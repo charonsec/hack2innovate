@@ -82,7 +82,7 @@ export function generateSecureVersion(
     seen.add(vuln.type);
   }
 
-  ensureNoEmptyTrailing(version);
+  version = ensureNoEmptyTrailing(version);
   return version.trimEnd() + '\n';
 }
 
@@ -139,8 +139,11 @@ function indentBlock(block: string): string {
     .join('\n');
 }
 
-function ensureNoEmptyTrailing(code: string): void {
-  void code.endsWith('\n\n');
+function ensureNoEmptyTrailing(code: string): string {
+  while (code.endsWith('\n\n')) {
+    code = code.slice(0, -1);
+  }
+  return code;
 }
 
 /** Line-based unified diff (LCS-free, Myers-free heuristic that is adequate for

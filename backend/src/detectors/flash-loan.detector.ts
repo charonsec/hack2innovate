@@ -15,6 +15,7 @@ import {
   walkAst,
   AstNode,
 } from '../engine/detector-utils';
+import { computeConfidence, buildAttackPath, evidenceSnippet } from '../engine/confidence';
 
 /**
  * DETECTOR 6 — Flash-loan attack surface (SWC-107 / SWC-113 / SWC-109)
@@ -38,6 +39,12 @@ export class FlashLoanDetector implements Detector {
     const fnNodes = findNodes(context.ast, 'FunctionDefinition');
     const sensitiveFns = ['borrow', 'flash', 'flashloan', 'flash_loan', 'lend', 'loan', 'liquidate'];
 
+    // Check if the contract itself has a flash loan function (for exploit chain detection).
+    const hasFlashFunction = fnNodes.some((fn) => {
+      const n = ((fn.name as string) || '').toLowerCase();
+      return n.includes('flash') || n.includes('onflashloan') || n.includes('executeoperation');
+    });
+
     for (const fn of fnNodes) {
       const name = ((fn.name as string) || '').toLowerCase();
       if (!sensitiveFns.some((s) => name.includes(s))) continue;
@@ -58,8 +65,27 @@ export class FlashLoanDetector implements Detector {
       const hasExternalCall = this.functionHasCall(context, fn, 'call');
       const hasGuard = modifiers.includes('nonReentrant') || context.usesReentrancyGuard;
 
+      // If function has guard → flag LOW or skip.
+      if (hasExternalCall && hasGuard) {
+        // Guarded flash-loan function — very low risk, skip or flag LOW.
+        const confidence = computeConfidence(30, { guardPresent: true });
+        const evidence: string[] = [
+          evidenceSnippet(context.sourceCode, startLine, startLine),
+          'Function has reentrancy guard — standard mitigations in place',
+        ];
+        // Don't flag at all — guarded functions are not a finding.
+      }
+
       if (hasExternalCall && !hasGuard) {
         const repaymentCheck = this.hasRepaymentCheck(context, fn);
+        const confidence = computeConfidence(80);
+        const evidence: string[] = [
+          evidenceSnippet(context.sourceCode, startLine, startLine),
+          `Function ${fnName}() makes external low-level call without reentrancy guard`,
+        ];
+        if (!repaymentCheck) {
+          evidence.push('No repayment integrity check detected after external call');
+        }
         results.push({
           type: 'FLASH_LOAN' as VulnerabilityType,
           severity: 'HIGH',
@@ -70,6 +96,26 @@ export class FlashLoanDetector implements Detector {
             'pool before balances settle, and drain liquidity in a single ' +
             'transaction — the classic Cream / Euler-brand read-only-reentrancy ' +
             'and flash-loan attack primitive.',
+          confidence,
+          evidence,
+          attackPath: buildAttackPath([
+            {
+              label: 'Attacker initiates flash loan',
+              description: 'Borrow maximum liquidity from Aave/dYdX in a single transaction',
+            },
+            {
+              label: 'Re-enter unprotected function',
+              description: 'The flash-loaned callback re-enters the vulnerable function before state updates',
+            },
+            {
+              label: 'Manipulate pool state',
+              description: 'Use re-entrancy to bypass balance checks and extract additional funds',
+            },
+            {
+              label: 'Repay flash loan',
+              description: 'Repay the original flash loan with the stolen surplus',
+            },
+          ]),
           lineStart: startLine,
           lineEnd: endLine,
           columnStart: 0,
@@ -94,6 +140,16 @@ export class FlashLoanDetector implements Detector {
       // Single-block price dependency inside borrow/liquidate is exploitable
       // directly with a flash loan in the same transaction.
       if (this.functionReadsSpotPrice(context, fn)) {
+        // If the contract also has a flash function, this is a compound exploit chain.
+        const isCompoundChain = hasFlashFunction || name.includes('flash');
+        const confidence = computeConfidence(85, { crossFunction: isCompoundChain });
+        const evidence: string[] = [
+          evidenceSnippet(context.sourceCode, startLine, startLine),
+          `Function ${fnName}() reads spot price (getReserves/balanceOf/price)`,
+        ];
+        if (isCompoundChain) {
+          evidence.push('Contract also contains a flash loan function — full exploit chain is self-contained');
+        }
         results.push({
           type: 'FLASH_LOAN' as VulnerabilityType,
           severity: 'CRITICAL',
@@ -104,6 +160,30 @@ export class FlashLoanDetector implements Detector {
             'attacker move the pool balance, call borrow/liquidate at the skewed ' +
             'price, and repay within the same transaction — draining value with zero ' +
             'capital. This is the core of Curve / GMX / Platypus flash-loan exploits.',
+          confidence,
+          evidence,
+          attackPath: buildAttackPath([
+            {
+              label: 'Attacker flash-borrows from Aave/dYdX',
+              description: 'Obtain a large capital loan in a single transaction with zero upfront collateral',
+            },
+            {
+              label: 'Manipulate DEX pool reserves',
+              description: 'Swap flash-loaned tokens to skew the pool\'s getReserves() spot price',
+            },
+            {
+              label: 'Call vulnerable function at skewed price',
+              description: `${fnName}() reads the manipulated spot price for collateral valuation or liquidation`,
+            },
+            {
+              label: 'Extract excess value',
+              description: 'Borrow against inflated collateral or trigger liquidation at a favorable price',
+            },
+            {
+              label: 'Repay flash loan',
+              description: 'Return the original flash loan; profit is the delta between manipulated and fair price',
+            },
+          ]),
           lineStart: startLine,
           lineEnd: endLine,
           columnStart: 0,
@@ -141,6 +221,11 @@ export class FlashLoanDetector implements Detector {
 
       const whitelabelCaller = this.callerValidated(context, cb);
       if (!whitelabelCaller) {
+        const confidence = computeConfidence(70);
+        const evidence: string[] = [
+          evidenceSnippet(context.sourceCode, startLine, startLine),
+          `${cbName}() does not validate msg.sender against a trusted flash-loan provider`,
+        ];
         results.push({
           type: 'FLASH_LOAN' as VulnerabilityType,
           severity: 'HIGH',
@@ -149,6 +234,22 @@ export class FlashLoanDetector implements Detector {
             `${cbName}() executes arbitrary code with the pool's assets but never ` +
             'verifies that msg.sender is the trusted flash-loan provider. An attacker ' +
             'can invoke the callback directly and steal loaned funds.',
+          confidence,
+          evidence,
+          attackPath: buildAttackPath([
+            {
+              label: 'Attacker deploys malicious contract',
+              description: 'The attacker\'s contract calls the callback directly without going through the flash-loan provider',
+            },
+            {
+              label: 'Callback executes with pool assets',
+              description: 'The callback moves funds based on unvalidated assumptions about the caller',
+            },
+            {
+              label: 'Funds transferred to attacker',
+              description: 'The callback\'s logic sends assets to the attacker\'s address',
+            },
+          ]),
           lineStart: startLine,
           lineEnd: nodeEndLine(cb),
           columnStart: 0,

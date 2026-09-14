@@ -35,8 +35,11 @@ export function AuditPage() {
     setScanStatus('scanning');
     setReport(null);
     selectVulnerability(null);
-
-    await startAudit({ contractName, sourceCode });
+    try {
+      await startAudit({ contractName, sourceCode });
+    } catch {
+      // error surfaced via store
+    }
   }, [scanStatus, setScanStatus, setReport, selectVulnerability, startAudit, contractName, sourceCode]);
 
   const handleVulnSelect = (vuln: Parameters<typeof selectVulnerability>[0]) => {

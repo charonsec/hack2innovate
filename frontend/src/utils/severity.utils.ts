@@ -44,8 +44,9 @@ export function severityRank(severity: Severity): number {
   return SEVERITY_ORDER.indexOf(severity);
 }
 
-export function severityColorHex(severity: Severity): string {
-  return SEVERITY_COLORS[severity].hex;
+export function severityColorHex(severity: string): string {
+  const colors = SEVERITY_COLORS[severity as Severity];
+  return colors?.hex ?? '#6B7280';
 }
 
 export function riskLabelColor(label: string): string {

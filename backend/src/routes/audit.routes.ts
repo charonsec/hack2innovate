@@ -1,13 +1,15 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { runAudit, ProgressCallback } from '../engine/analyzer';
+import { analyzeBytecode } from '../engine/bytecode';
 import { AuditReport } from '../types/index';
 import { sendTo, broadcast } from '../wsHub';
 import { WebSocket } from 'ws';
 import { loadTemplates } from '../templates/index';
+import { loadDemos } from '../demo/index';
 
 // In-memory report store keyed by reportId.
-const reportStore = new Map<string, AuditReport>();
+export const reportStore = new Map<string, AuditReport>();
 
 const router = Router();
 
@@ -18,7 +20,7 @@ const router = Router();
  */
 router.post('/audit', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { contractName, sourceCode, contractAddress, network } = req.body;
+    const { contractName, sourceCode, contractAddress, network, bytecode } = req.body;
 
     if (!contractName || typeof contractName !== 'string' || !contractName.trim()) {
       res.status(400).json({ error: 'contractName is required' });
@@ -58,6 +60,7 @@ router.post('/audit', async (req: Request, res: Response, next: NextFunction) =>
       sourceCode,
       contractAddress: contractAddress ?? undefined,
       network: network ?? undefined,
+      bytecode: bytecode ?? undefined,
       onProgress,
     });
 
@@ -66,6 +69,33 @@ router.post('/audit', async (req: Request, res: Response, next: NextFunction) =>
     res.status(200).json(report);
   } catch (err) {
     next(err);
+  }
+});
+
+/**
+ * POST /api/bytecode
+ * Standalone EVM bytecode disassembly + opcode analysis.
+ * Accepts JSON body: { bytecode }
+ */
+router.post('/bytecode', (req: Request, res: Response) => {
+  try {
+    const { bytecode } = req.body;
+
+    if (!bytecode || typeof bytecode !== 'string' || !bytecode.trim()) {
+      res.status(200).json({ analysis: analyzeBytecode('') });
+      return;
+    }
+    if (bytecode.length > 10_000_000) {
+      res.status(413).json({ error: 'bytecode exceeds 10 MB limit' });
+      return;
+    }
+
+    const analysis = analyzeBytecode(bytecode);
+
+    // Invalid hex is a valid analysis outcome, not a protocol error.
+    res.status(200).json({ analysis });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Internal server error' });
   }
 });
 
@@ -93,6 +123,19 @@ router.get('/templates', (_req: Request, res: Response) => {
     res.status(200).json(templates);
   } catch (err) {
     res.status(500).json({ error: 'Failed to load templates' });
+  }
+});
+
+/**
+ * GET /api/demos
+ * Return all built-in demo contracts (vulnerable + secure).
+ */
+router.get('/demos', (_req: Request, res: Response) => {
+  try {
+    const demos = loadDemos();
+    res.status(200).json(demos);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load demos' });
   }
 });
 

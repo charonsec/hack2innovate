@@ -9,8 +9,16 @@ import {
   LayoutDashboard,
   PieChart,
   Flag,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  ScanSearch,
+  Workflow,
+  Binary,
+  AlertTriangle,
 } from 'lucide-react';
-import type { AuditReport as AuditReportType } from '@/types';
+import type { AuditReport as AuditReportType, VulnerabilityType } from '@/types';
+import { VULNERABILITY_TYPE_LABELS } from '@/types';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useAuditStore } from '@/store/auditStore';
 import { ReportHeader } from '@/components/report/ReportHeader';
@@ -18,6 +26,7 @@ import { ExecutiveSummary } from '@/components/report/ExecutiveSummary';
 import { SeverityBadge } from '@/components/audit/SeverityBadge';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { FindingsList } from '@/components/audit/FindingsList';
 import { CFGGraph } from '@/components/graphs/CFGGraph';
 import { SeverityPieChart, VulnBarChart } from '@/components/graphs/severityCharts';
@@ -25,6 +34,7 @@ import { DiffViewer } from '@/components/editor/DiffViewer';
 import { SolidityEditor } from '@/components/editor/SolidityEditor';
 import { PDFExporter } from '@/components/report/PDFExporter';
 import VulnerabilityDetail from '@/components/audit/VulnerabilityDetail';
+import { useAudit } from '@/hooks/useAudit';
 
 export interface AuditReportProps {
   report: AuditReportType;
@@ -46,6 +56,8 @@ const TABS: TabDef[] = [
   { id: 'risks', label: 'Risk Ratings', icon: ShieldAlert },
   { id: 'remediation', label: 'Remediation', icon: Wrench },
   { id: 'closing', label: 'Closing', icon: Flag },
+  { id: 'dataflow', label: 'Data Flow', icon: Workflow },
+  { id: 'bytecode', label: 'Bytecode', icon: Binary },
 ];
 
 function countAstNodes(node: unknown, acc: Map<string, number>): void {
@@ -80,6 +92,9 @@ export function AuditReport({ report }: AuditReportProps) {
   const selectedVulnerability = useAuditStore((s) => s.selectedVulnerability);
   const selectVulnerability = useAuditStore((s) => s.selectVulnerability);
   const originalSourceCode = useAuditStore((s) => s.sourceCode);
+  const verifyReport = useAuditStore((s) => s.verifyReport);
+  const verifyStatus = useAuditStore((s) => s.verifyStatus);
+  const { startVerifyAudit } = useAudit();
 
   const ast = astStats(report.ast);
 
@@ -216,6 +231,11 @@ export function AuditReport({ report }: AuditReportProps) {
                 <CFGGraph
                   nodes={report.cfg}
                   vulnerableLines={report.vulnerabilities.map((v) => v.lineStart)}
+                  onSelectLine={(line) => {
+                    setActiveTab('findings');
+                    const vuln = report.vulnerabilities.find((v) => line >= v.lineStart && line <= v.lineEnd);
+                    if (vuln) selectVulnerability(vuln);
+                  }}
                 />
               </CardContent>
             </Card>
@@ -347,6 +367,14 @@ export function AuditReport({ report }: AuditReportProps) {
                 remediated={report.secureTemplate ?? ''}
               />
 
+              <VerifyFixCard
+                report={report}
+                remediatedCode={report.secureTemplate ?? ''}
+                verifyReport={verifyReport}
+                verifyStatus={verifyStatus}
+                onVerify={startVerifyAudit}
+              />
+
               {report.secureTemplate ? (
                 <Card>
                   <CardHeader>
@@ -428,6 +456,197 @@ export function AuditReport({ report }: AuditReportProps) {
               </CardContent>
             </Card>
           </TabsContent>
+
+          <TabsContent value="dataflow" className="mt-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Taint Analysis</CardTitle>
+                <CardDescription>
+                  Data flow tracking across {report.taintAnalysis?.sources?.length ?? 0} sources 
+                  through {(report.taintAnalysis?.edges?.length ?? 0).toLocaleString()} edges 
+                  to {(report.taintAnalysis?.sinks?.length ?? 0)} sink operations.
+                  Sources represent untrusted inputs (msg.sender, msg.value, calldata, oracle reads),
+                  sinks represent dangerous uses (state writes, arithmetic, access control).
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                {report.taintAnalysis && report.taintAnalysis.sources.length > 0 && (
+                  <div>
+                    <h4 className="mb-3 text-sm font-medium text-textPrimary">
+                      Taint Sources ({report.taintAnalysis.sources.length})
+                    </h4>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {report.taintAnalysis.sources.map((src) => (
+                        <div
+                          key={src.id}
+                          className="flex flex-col gap-1 rounded-lg border border-[#2A2D35] bg-surface px-3 py-2"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Badge variant={
+                              src.confidence === 'high' ? 'critical' :
+                              src.confidence === 'medium' ? 'medium' : 'default'
+                            } className="text-[10px]">
+                              {src.confidence}
+                            </Badge>
+                            <span className="font-mono text-xs text-textPrimary">{src.source}</span>
+                            {src.variable && (
+                              <span className="text-xs text-textSecondary">→ {src.variable}</span>
+                            )}
+                            <span className="ml-auto text-[10px] text-textSecondary">L{src.line}</span>
+                          </div>
+                          <p className="text-[11px] text-textSecondary">{src.expression}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {report.taintAnalysis && report.taintAnalysis.sinks.length > 0 && (
+                  <div>
+                    <h4 className="mb-3 text-sm font-medium text-textPrimary">
+                      Sink Operations ({report.taintAnalysis.sinks.length})
+                    </h4>
+                    <div className="space-y-1.5">
+                      {report.taintAnalysis.sinks.map((sink, i) => (
+                        <div
+                          key={`${sink.sink}-${sink.line}-${i}`}
+                          className="flex items-center gap-3 rounded-lg border border-[#2A2D35] bg-surface px-3 py-2 text-sm"
+                        >
+                          <Badge variant={
+                            sink.sink === 'state_write' ? 'critical' :
+                            sink.sink === 'price_calc' ? 'critical' :
+                            sink.sink === 'arithmetic' ? 'medium' :
+                            sink.sink === 'transfer_amount' ? 'medium' :
+                            sink.sink === 'access_control' ? 'success' : 'default'
+                          } className="text-[10px] shrink-0">
+                            {sink.sink}
+                          </Badge>
+                          <span className="font-mono text-xs text-textPrimary truncate">
+                            {sink.expression}
+                          </span>
+                          <span className="ml-auto shrink-0 text-[10px] text-textSecondary">L{sink.line}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {!report.taintAnalysis && (
+                  <p className="py-8 text-center text-sm text-textSecondary">
+                    Taint analysis data not available for this report.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="bytecode" className="mt-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Bytecode Disassembly</CardTitle>
+                <CardDescription>
+                  EVM opcode-level analysis of compiled contract bytecode.
+                  {report.bytecodeAnalysis && report.bytecodeAnalysis.valid
+                    ? ` ${report.bytecodeAnalysis.instructionCount} instructions, ${report.bytecodeAnalysis.findings.length} dangerous opcode findings.`
+                    : report.bytecodeAnalysis?.error || ' No bytecode available for this contract.'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                {report.bytecodeAnalysis && report.bytecodeAnalysis.valid && (
+                  <>
+                    {report.bytecodeAnalysis.findings.length > 0 && (
+                      <div>
+                        <h4 className="mb-3 text-sm font-medium text-textPrimary">
+                          Dangerous Opcode Findings ({report.bytecodeAnalysis.findings.length})
+                        </h4>
+                        <div className="space-y-2">
+                          {report.bytecodeAnalysis.findings.map((f, i) => (
+                            <div
+                              key={`${f.opcode}-${f.pc}-${i}`}
+                              className="flex items-start gap-3 rounded-lg border border-[#2A2D35] bg-surface px-3 py-2"
+                            >
+                              <Badge variant={
+                                f.severity === 'CRITICAL' ? 'critical' :
+                                f.severity === 'HIGH' ? 'critical' :
+                                f.severity === 'MEDIUM' ? 'medium' : 'default'
+                              } className="text-[10px] shrink-0">
+                                {f.severity}
+                              </Badge>
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-textPrimary">
+                                  <span className="font-mono text-xs text-critical">{f.opcode}</span> at PC {f.pc}
+                                </p>
+                                <p className="text-xs text-textSecondary">{f.title}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <h4 className="mb-3 text-sm font-medium text-textPrimary">
+                        Opcode Disassembly ({report.bytecodeAnalysis.instructionCount} instructions)
+                      </h4>
+                      <div className="max-h-[400px] overflow-auto rounded-lg border border-[#2A2D35] bg-[#0A0C10] p-4 font-mono text-xs">
+                        <table className="w-full">
+                          <thead>
+                            <tr className="text-[10px] uppercase text-textSecondary">
+                              <th className="py-1 pr-4 text-left">PC</th>
+                              <th className="py-1 pr-4 text-left">Opcode</th>
+                              <th className="py-1 text-left">Args</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {report.bytecodeAnalysis.opcodes.slice(0, 500).map((op) => (
+                              <tr
+                                key={op.pc}
+                                className={op.isDangerous ? 'bg-danger/5' : ''}
+                              >
+                                <td className="py-0.5 pr-4 text-textSecondary">
+                                  {op.pc.toString(16).padStart(4, '0')}
+                                </td>
+                                <td className={`py-0.5 pr-4 ${op.isDangerous ? 'font-bold text-critical' : 'text-textPrimary'}`}>
+                                  {op.mnemonic}
+                                </td>
+                                <td className="py-0.5 text-textSecondary">
+                                  {op.args.length > 0
+                                    ? '0x' + op.args.map((b) => b.toString(16).padStart(2, '0')).join('')
+                                    : ''}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {report.bytecodeAnalysis.opcodes.length > 500 && (
+                          <p className="mt-2 text-center text-textSecondary">
+                            Showing first 500 of {report.bytecodeAnalysis.opcodes.length} instructions.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {report.bytecodeAnalysis && !report.bytecodeAnalysis.valid && (
+                  <div className="py-8 text-center">
+                    <AlertTriangle className="mx-auto mb-3 h-8 w-8 text-critical" />
+                    <p className="text-sm text-textSecondary">
+                      {report.bytecodeAnalysis.error || 'Invalid bytecode — cannot disassemble.'}
+                    </p>
+                  </div>
+                )}
+
+                {!report.bytecodeAnalysis && (
+                  <div className="py-8 text-center">
+                    <p className="text-sm text-textSecondary">
+                      No bytecode data available for this contract. Supply bytecode via the audit API to enable opcode-level analysis.
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
         </Tabs>
       </div>
     </div>
@@ -477,4 +696,150 @@ function countStateVars(ast: object | undefined): number {
   };
   walk(ast ?? {});
   return count;
+}
+
+function dedupeTypes(vulnerabilities: { type: VulnerabilityType }[]): VulnerabilityType[] {
+  return [...new Set(vulnerabilities.map((v) => v.type))];
+}
+
+interface VerifyFixCardProps {
+  report: AuditReportType;
+  remediatedCode: string;
+  verifyReport: AuditReportType | null;
+  verifyStatus: 'idle' | 'scanning' | 'complete' | 'error';
+  onVerify: (source: string, name: string) => Promise<AuditReportType | null>;
+}
+
+function VerifyFixCard({
+  report,
+  remediatedCode,
+  verifyReport,
+  verifyStatus,
+  onVerify,
+}: VerifyFixCardProps) {
+  const contractName = useAuditStore((s) => s.contractName);
+
+  const beforeTypes = dedupeTypes(report.vulnerabilities);
+  const afterTypes = verifyReport ? dedupeTypes(verifyReport.vulnerabilities) : [];
+  const afterSet = new Set(afterTypes);
+  const rows = beforeTypes.map((type) => ({
+    type,
+    resolved: !afterSet.has(type),
+  }));
+  const resolvedCount = rows.filter((r) => r.resolved).length;
+
+  return (
+    <Card className="border-[#2A2D35]">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ScanSearch size={16} className="text-[#00FF88]" />
+          Remediation verification
+        </CardTitle>
+        <CardDescription>
+          Rescan the remediated contract to confirm the patch resolved the original
+          vulnerability classes.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {verifyStatus === 'idle' && (
+          <Button
+            variant="default"
+            onClick={() => onVerify(remediatedCode, contractName)}
+            disabled={!remediatedCode}
+            data-testid="verify-fix-button"
+          >
+            <ScanSearch size={14} />
+            Scan remediated contract
+          </Button>
+        )}
+
+        {verifyStatus === 'scanning' && (
+          <div className="flex items-center gap-3 rounded-lg border border-[#2A2D35] bg-surface px-4 py-3">
+            <Loader2 size={18} className="animate-spin text-[#00FF88]" />
+            <span className="text-sm text-textSecondary">
+              Scanning remediated contract...
+            </span>
+          </div>
+        )}
+
+        {verifyStatus === 'error' && (
+          <div className="rounded-lg border border-critical/40 bg-critical/10 px-4 py-3 text-sm text-[#FCA5A5]">
+            Verification scan failed. The patch could not be re-audited — check your
+            connection and try again.
+          </div>
+        )}
+
+        {verifyStatus === 'complete' && verifyReport && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Badge variant="success">
+                {resolvedCount} of {beforeTypes.length} resolved
+              </Badge>
+              <span className="text-textSecondary">
+                {(resolvedCount / Math.max(beforeTypes.length, 1)) * 100}% clean
+              </span>
+            </div>
+
+            <div className="overflow-hidden rounded-lg border border-[#2A2D35]">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-[#2A2D35] bg-surface text-xs uppercase tracking-wider text-textSecondary">
+                    <th className="py-2.5 pl-4 pr-4 font-medium">Vulnerability class</th>
+                    <th className="py-2.5 pl-4 pr-4 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr
+                      key={row.type}
+                      className="border-b border-[#2A2D35]/50 last:border-0 hover:bg-surface"
+                    >
+                      <td className="py-2.5 pl-4 pr-4 font-mono text-xs text-textPrimary">
+                        {VULNERABILITY_TYPE_LABELS[row.type]}
+                      </td>
+                      <td className="py-2.5 pl-4 pr-4">
+                        {row.resolved ? (
+                          <span className="inline-flex items-center gap-1.5 text-[#00FF88]">
+                            <CheckCircle2 size={14} />
+                            resolved
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-[#F87171]">
+                            <XCircle size={14} />
+                            still present
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {afterTypes.length > 0 && (() => {
+              const newTypes = afterTypes.filter((t) => !beforeTypes.includes(t));
+              const text = newTypes.map((t) => VULNERABILITY_TYPE_LABELS[t]).join(', ');
+              return text ? (
+                <p className="text-xs text-textSecondary">
+                  The rescan also reported new classes: {text}.
+                </p>
+              ) : null;
+            })()}
+
+            <Button variant="outline" size="sm" onClick={() => onVerify(remediatedCode, contractName)}>
+              <ScanSearch size={14} />
+              Rescan again
+            </Button>
+          </div>
+        )}
+
+        {!remediatedCode && (
+          <p className="text-sm text-textSecondary">
+            No remediated contract was generated for this report, so verification is not
+            possible.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
 }

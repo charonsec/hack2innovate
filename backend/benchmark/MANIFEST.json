@@ -1,0 +1,76 @@
+{
+  "version": "1.0.0",
+  "description": "Labeled corpus for smart-contract-auditor precision/recall benchmark",
+  "contracts": [
+    {
+      "file": "vulnerable/ReentrancyVuln.sol",
+      "expected": ["REENTRANCY"],
+      "notes": "Classic reentrancy: external call before state update, no guard"
+    },
+    {
+      "file": "vulnerable/AccessControlVuln.sol",
+      "expected": ["ACCESS_CONTROL", "ORACLE_MANIPULATION"],
+      "notes": "setOracle without onlyOwner — any caller can overwrite the mutable price source (compound access-control + oracle risk)"
+    },
+    {
+      "file": "vulnerable/OverflowVuln.sol",
+      "expected": ["INTEGER_OVERFLOW", "INTEGER_UNDERFLOW"],
+      "notes": "pragma ^0.7.6, no SafeMath, arithmetic on uint256"
+    },
+    {
+      "file": "vulnerable/UncheckedCallVuln.sol",
+      "expected": ["UNCHECKED_RETURN"],
+      "notes": "Low-level .call return value ignored, no require(ok)"
+    },
+    {
+      "file": "vulnerable/TimestampVuln.sol",
+      "expected": ["TIMESTAMP_DEPENDENCE"],
+      "notes": "block.timestamp % 10 determines lottery winner"
+    },
+    {
+      "file": "vulnerable/DelegatecallVuln.sol",
+      "expected": ["DELEGATECALL"],
+      "notes": "delegatecall to user-supplied address parameter"
+    },
+    {
+      "file": "vulnerable/OracleVuln.sol",
+      "expected": ["ORACLE_MANIPULATION"],
+      "notes": "balanceOf() used as spot price for borrow calculation"
+    },
+    {
+      "file": "vulnerable/UninitStorageVuln.sol",
+      "expected": ["UNINITIALIZED_STORAGE"],
+      "notes": "Storage pointer declared without initializer"
+    },
+    {
+      "file": "vulnerable/TxOriginVuln.sol",
+      "expected": ["ACCESS_CONTROL"],
+      "notes": "tx.origin used for authorization in sensitive functions"
+    },
+    {
+      "file": "secure/SecureReentrancy.sol",
+      "expected": [],
+      "notes": "CEI ordering + nonReentrant modifier — no reentrancy finding expected"
+    },
+    {
+      "file": "secure/SecureAccessControl.sol",
+      "expected": [],
+      "notes": "onlyOwner on setOracle — no access control finding expected"
+    },
+    {
+      "file": "secure/SecureArithmetic.sol",
+      "expected": [],
+      "notes": "pragma ^0.8.17 — built-in overflow protection, no finding expected"
+    },
+    {
+      "file": "secure/SecureOracle.sol",
+      "expected": [],
+      "notes": "Chainlink AggregatorV3Interface with staleness check — no oracle manipulation expected"
+    },
+    {
+      "file": "secure/SecureCall.sol",
+      "expected": [],
+      "notes": "require(success) after .call — no unchecked return finding expected"
+    }
+  ]
+}

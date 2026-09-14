@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { TemplateInfo } from '../types/index';
 
-const TEMPLATES_DIR = path.join(__dirname, '..', 'templates');
+const TEMPLATES_DIR = path.resolve(__dirname, '../../src/templates');
 
 export function loadTemplates(): TemplateInfo[] {
   const files = fs

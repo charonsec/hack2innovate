@@ -93,43 +93,113 @@ export function getLineType(line: string, origLines: Set<string>, addLines: Set<
   return 'context';
 }
 
+/**
+ * LCS (longest common subsequence) on two arrays of lines using a classic
+ * dynamic-programming table. Returns the common subsequence of exact lines
+ * (indentation preserved) shared between `a` and `b`.
+ */
+function lcsLines(a: string[], b: string[]): string[] {
+  const n = a.length;
+  const m = b.length;
+  const width = m + 1;
+  const dp = new Uint32Array((n + 1) * width);
+  for (let i = n - 1; i >= 0; i--) {
+    const row = i * width;
+    const nextRow = row + width;
+    for (let j = m - 1; j >= 0; j--) {
+      dp[row + j] =
+        a[i] === b[j]
+          ? dp[nextRow + j + 1] + 1
+          : Math.max(dp[nextRow + j], dp[row + j + 1]);
+    }
+  }
+  const lcs: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      lcs.push(a[i]);
+      i++;
+      j++;
+    } else if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return lcs;
+}
+
 export function computeDiff(original: string, remediated: string): DiffLine[] {
   const origLines = original.split('\n');
-  const remedLines = remediated.split('\n');
+  const remLines = remediated.split('\n');
 
-  const origSet = new Set(origLines.map((l) => l.trim()));
-  const addSet = new Set(remedLines.map((l) => l.trim()));
+  // Trim the identical prefix and suffix so the DP only runs over the
+  // actually-changed region.
+  let prefixLen = 0;
+  const commonMin = Math.min(origLines.length, remLines.length);
+  while (
+    prefixLen < commonMin &&
+    origLines[prefixLen] === remLines[prefixLen]
+  ) {
+    prefixLen++;
+  }
 
-  const maxLen = Math.max(origLines.length, remedLines.length);
+  let origEnd = origLines.length;
+  let remEnd = remLines.length;
+  while (
+    origEnd > prefixLen &&
+    remEnd > prefixLen &&
+    origLines[origEnd - 1] === remLines[remEnd - 1]
+  ) {
+    origEnd--;
+    remEnd--;
+  }
+
   const result: DiffLine[] = [];
 
-  let origIdx = 0;
-  let remIdx = 0;
+  for (let k = 0; k < prefixLen; k++) {
+    result.push({ type: 'context', content: origLines[k], lineNumber: k + 1 });
+  }
 
-  while (origIdx < origLines.length || remIdx < remedLines.length) {
-    const oLine = origIdx < origLines.length ? origLines[origIdx] : undefined;
-    const rLine = remIdx < remedLines.length ? remedLines[remIdx] : undefined;
+  const midOrig = origLines.slice(prefixLen, origEnd);
+  const midRem = remLines.slice(prefixLen, remEnd);
+  const lcs = lcsLines(midOrig, midRem);
 
-    if (oLine !== undefined && rLine !== undefined && oLine === rLine) {
-      result.push({ type: 'context', content: oLine, lineNumber: origIdx + 1 });
-      origIdx++;
-      remIdx++;
-    } else if (rLine !== undefined && !origSet.has(rLine.trim())) {
-      result.push({ type: 'add', content: rLine, lineNumber: null });
-      remIdx++;
-    } else if (oLine !== undefined && !addSet.has(oLine.trim())) {
-      result.push({ type: 'remove', content: oLine, lineNumber: origIdx + 1 });
-      origIdx++;
-    } else {
-      if (oLine !== undefined) {
-        result.push({ type: 'remove', content: oLine, lineNumber: origIdx + 1 });
-        origIdx++;
-      }
-      if (rLine !== undefined) {
-        result.push({ type: 'add', content: rLine, lineNumber: null });
-        remIdx++;
-      }
+  let i = 0;
+  let j = 0;
+  for (const line of lcs) {
+    while (i < midOrig.length && midOrig[i] !== line) {
+      result.push({
+        type: 'remove',
+        content: midOrig[i],
+        lineNumber: prefixLen + i + 1,
+      });
+      i++;
     }
+    while (j < midRem.length && midRem[j] !== line) {
+      result.push({ type: 'add', content: midRem[j], lineNumber: null });
+      j++;
+    }
+    result.push({ type: 'context', content: line, lineNumber: prefixLen + i + 1 });
+    i++;
+    j++;
+  }
+  while (i < midOrig.length) {
+    result.push({
+      type: 'remove',
+      content: midOrig[i],
+      lineNumber: prefixLen + i + 1,
+    });
+    i++;
+  }
+  while (j < midRem.length) {
+    result.push({ type: 'add', content: midRem[j], lineNumber: null });
+    j++;
+  }
+
+  for (let k = origEnd; k < origLines.length; k++) {
+    result.push({ type: 'context', content: origLines[k], lineNumber: k + 1 });
   }
 
   return result;

@@ -20,6 +20,8 @@ export function useAudit() {
     setReport,
     setError,
     contractName,
+    setVerifyReport,
+    setVerifyStatus,
   } = useAuditStore();
 
   const startAudit = useCallback(
@@ -104,10 +106,36 @@ export function useAudit() {
     }>;
   }, []);
 
+  const startVerifyAudit = useCallback(
+    async (source: string, name: string): Promise<AuditReport | null> => {
+      setVerifyStatus('scanning');
+      setVerifyReport(null);
+      try {
+        const res = await fetch(`${API_URL}/audit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contractName: name, sourceCode: source }),
+        });
+        if (!res.ok) throw new Error('Audit failed');
+        const report = (await res.json()) as AuditReport;
+        setVerifyReport(report);
+        setVerifyStatus('complete');
+        return report;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Unknown audit error';
+        setVerifyStatus('error');
+        console.error('Verification audit failed:', msg);
+        return null;
+      }
+    },
+    [setVerifyReport, setVerifyStatus]
+  );
+
   return {
     startAudit,
     handleWSEvent,
     fetchReport,
     fetchTemplates,
+    startVerifyAudit,
   };
 }

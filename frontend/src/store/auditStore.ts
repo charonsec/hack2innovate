@@ -17,6 +17,8 @@ interface AuditState {
   selectedVulnerability: Vulnerability | null;
   activeTab: string;
   errorMessage: string | null;
+  verifyReport: AuditReport | null;
+  verifyStatus: ScanStatus;
 
   setSourceCode: (code: string) => void;
   setContractName: (name: string) => void;
@@ -30,6 +32,8 @@ interface AuditState {
   setActiveTab: (tab: string) => void;
   setError: (message: string | null) => void;
   resetScan: () => void;
+  setVerifyReport: (report: AuditReport | null) => void;
+  setVerifyStatus: (status: ScanStatus) => void;
 }
 
 let logCounter = 0;
@@ -47,6 +51,8 @@ export const useAuditStore = create<AuditState>((set) => ({
   selectedVulnerability: null,
   activeTab: 'overview',
   errorMessage: null,
+  verifyReport: null,
+  verifyStatus: 'idle',
 
   setSourceCode: (code) => set({ sourceCode: code }),
   setContractName: (name) => set({ contractName: name }),
@@ -100,4 +106,8 @@ export const useAuditStore = create<AuditState>((set) => ({
       selectedVulnerability: null,
       errorMessage: null,
     }),
+
+  setVerifyReport: (report) => set({ verifyReport: report }),
+
+  setVerifyStatus: (status) => set({ verifyStatus: status }),
 }));

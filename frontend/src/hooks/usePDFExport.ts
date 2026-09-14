@@ -141,13 +141,33 @@ export function usePDFExport(report: AuditReport | null) {
         pdf.setFont('helvetica', 'normal');
         pdf.setFontSize(9);
         pdf.setTextColor(241, 245, 249);
+        const confText = `Confidence: ${Math.round(vuln.confidence)}%`;
         const desc = pdf.splitTextToSize(
           `Lines ${vuln.lineStart}-${vuln.lineEnd} (CVSS ${vuln.cvssScore.toFixed(1)}) — ${vuln.description}`,
           contentWidth - 32
         );
-        pdf.text(desc.slice(0, 14), margin + 16, y + 34);
+        pdf.text(desc.slice(0, 12), margin + 16, y + 34);
 
-        y += 86;
+        pdf.setTextColor(148, 163, 184);
+        pdf.text(confText, margin + 16, y + 34 + Math.min(desc.length, 12) * 11 + 4);
+
+        let findingY = y + 34 + Math.min(desc.length, 12) * 11 + 16;
+
+        if (vuln.evidence && vuln.evidence.length > 0) {
+          pdf.setTextColor(148, 163, 184);
+          const eviItems = vuln.evidence.slice(0, 3);
+          for (const item of eviItems) {
+            const eviLines = pdf.splitTextToSize(`• ${item}`, contentWidth - 48);
+            for (const line of eviLines.slice(0, 2)) {
+              if (findingY > pageHeight - margin) { newPage(); }
+              pdf.text(line as string, margin + 22, findingY);
+              findingY += 11;
+            }
+            findingY += 2;
+          }
+        }
+
+        y = Math.max(y + 86, findingY + 6);
       }
 
       setProgress(55);

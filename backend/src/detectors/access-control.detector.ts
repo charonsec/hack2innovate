@@ -16,6 +16,7 @@ import {
   walkAst,
   AstNode,
 } from '../engine/detector-utils';
+import { computeConfidence, buildAttackPath, evidenceSnippet } from '../engine/confidence';
 
 const OZ_ACCESS_CONTROL_IMPORTS: Record<string, string> = {
   Ownable: 'import "@openzeppelin/contracts/access/Ownable.sol";',
@@ -27,16 +28,31 @@ export class AccessControlDetector implements Detector {
 
   detect(context: DetectorContext): DetectorResult[] {
     const results: DetectorResult[] = [];
-    const guardModifiers = ['onlyOwner', 'onlyRole', 'auth', 'authorized', 'adminOnly'];
-    const usesGuards = context.usesOwnable || context.usesAccessControl;
+    const guardModifiers = ['onlyowner', 'onlyrole', 'auth', 'authorized', 'adminonly'];
 
     if (!context.ast) return results;
 
     const fnNodes = findNodes(context.ast, 'FunctionDefinition');
+
+    let guardedFunctionCount = 0;
+    for (const fn of fnNodes) {
+      const mods: string[] = Array.isArray(fn.modifiers)
+        ? (fn.modifiers as AstNode[]).map((m) =>
+            typeof m.name === 'object' && m.name !== null
+              ? ((m.name as AstNode).name as string)
+              : (m.name as string)
+          )
+        : [];
+      if (mods.some((m) => guardModifiers.includes(m.toLowerCase()))) {
+        guardedFunctionCount++;
+      }
+    }
+    const hasPartialGuard = guardedFunctionCount > 0;
+
     for (const fn of fnNodes) {
       const name = (fn.name as string) || '';
       if (!name) continue;
-      if (!fn.body) continue; // skip interfaces/abstract declarations
+      if (!fn.body) continue;
       const visibility = (fn.visibility as string) || '';
       if (visibility !== 'public' && visibility !== 'external') continue;
 
@@ -52,12 +68,18 @@ export class AccessControlDetector implements Detector {
       const hasInlineAuthGuard = this.hasInlineAuthGuard(fn);
       const fnStart = nodeLine(fn);
       const fnEnd = nodeEndLine(fn);
+      const fnBodySnippet = evidenceSnippet(context.sourceCode, fnStart, fnEnd);
+      const ctxSnip = snippet(context.lines, fnStart, Math.min(fnStart + 5, fnEnd));
 
-      // 1) initialize() functions without guards can be front-run to take ownership.
+      // 1) initialize() functions without guards — front-running to seize ownership.
       if (
         ['initialize', 'init', 'initializer', 'setup'].includes(name.toLowerCase()) &&
-        !hasGuard
+        !hasGuard && !hasInlineAuthGuard
       ) {
+        const confidence = computeConfidence(85, {
+          lineMatchesEvidence: true,
+          financialImpact: true,
+        });
         results.push({
           type: 'ACCESS_CONTROL',
           severity: 'CRITICAL',
@@ -67,11 +89,35 @@ export class AccessControlDetector implements Detector {
             'proxy / upgradeable patterns an attacker can front-run the deployer and ' +
             'call initialize() first to seize ownership or set critical parameters ' +
             '(admin, oracle, implementation).',
+          confidence,
+          evidence: [fnBodySnippet],
+          attackPath: buildAttackPath([
+            {
+              label: 'ENTRY',
+              description: `Attacker calls ${name}() before the legitimate deployer`,
+              line: fnStart,
+            },
+            {
+              label: 'TRIGGER',
+              description: `No auth modifier (onlyOwner / initializer) present on ${name}()`,
+              line: fnStart,
+            },
+            {
+              label: 'EXPLOIT',
+              description: `Attacker-controlled values written to owner / admin / implementation slots`,
+              line: fnStart,
+            },
+            {
+              label: 'IMPACT',
+              description: 'Attacker owns the contract, sets arbitrary parameters, drains funds',
+              line: fnStart,
+            },
+          ]),
           lineStart: fnStart,
           lineEnd: fnEnd,
           columnStart: 0,
           columnEnd: 0,
-          codeSnippet: snippet(context.lines, fnStart, Math.min(fnStart + 5, fnEnd)),
+          codeSnippet: ctxSnip,
           recommendation:
             'Add the `initializer` modifier from OpenZeppelin, restrict the function to a ' +
             'deployer-only role, and add a requiresAdmin guard. Use a constructor for ' +
@@ -87,8 +133,21 @@ export class AccessControlDetector implements Detector {
       }
 
       // 2) Sensitive ops (mint/burn/transfer/owner changes/fees) without guards.
-      if (isSensitiveFunctionName(name) && !hasGuard && !hasInlineAuthGuard && !usesGuards) {
+      // FIX: only require hasGuard on the function itself — do NOT suppress when the
+      // contract inherits Ownable/AccessControl. A sensitive function with no guard is
+      // still vulnerable even if other functions ARE guarded.
+      if (isSensitiveFunctionName(name) && !hasGuard && !hasInlineAuthGuard) {
         const severity = this.sensitivitySeverity(name);
+        const financialImpact = /mint|withdraw|price|oracle|upgrade|fee/i.test(name);
+
+        let base = 75;
+        if (financialImpact) base += 10;
+        const confidence = computeConfidence(base, {
+          lineMatchesEvidence: true,
+          financialImpact,
+          crossFunction: hasPartialGuard,
+        });
+
         results.push({
           type: 'ACCESS_CONTROL',
           severity,
@@ -96,12 +155,43 @@ export class AccessControlDetector implements Detector {
           description:
             `${name}() is ${visibility} and operates on a privileged capability ` +
             '(mint, burn, transfer of value, ownership, fees, emergency controls) but ' +
-            'does not enforce any role/ownership modifier. Any caller can invoke it.',
+            'does not enforce any role/ownership modifier. Any caller can invoke it.' +
+            (hasPartialGuard
+              ? ' Note: other functions in this contract DO have access control guards — ' +
+                'this function was likely intended to be guarded but was missed.'
+              : ''),
+          confidence,
+          evidence: [fnBodySnippet],
+          attackPath: buildAttackPath([
+            {
+              label: 'ENTRY',
+              description: `Attacker calls ${name}() externally`,
+              line: fnStart,
+            },
+            {
+              label: 'TRIGGER',
+              description: `No onlyOwner / onlyRole modifier on ${name}()`,
+              line: fnStart,
+            },
+            {
+              label: 'EXPLOIT',
+              description: `${name}() executes privileged state change — attacker controls parameters / mints tokens / withdraws funds`,
+              line: fnStart,
+            },
+            {
+              label: 'IMPACT',
+              description:
+                financialImpact
+                  ? 'Financial loss — tokens minted, treasury drained, or protocol parameters set by attacker'
+                  : 'Privilege escalation — attacker gains administrative capability',
+              line: fnStart,
+            },
+          ]),
           lineStart: fnStart,
           lineEnd: fnEnd,
           columnStart: 0,
           columnEnd: 0,
-          codeSnippet: snippet(context.lines, fnStart, Math.min(fnStart + 6, fnEnd)),
+          codeSnippet: ctxSnip,
           recommendation:
             'Inherit OpenZeppelin Ownable or AccessControl, declare an ' +
             '`onlyOwner`/`onlyRole(...)` modifier and attach it to this function. ' +
@@ -127,6 +217,10 @@ export class AccessControlDetector implements Detector {
               const line = nodeLine(n);
               const ctxLine = snippet(context.lines, Math.max(1, line - 1), line + 1);
               if (this.isAuthContext(ctxLine)) {
+                const evidence = evidenceSnippet(context.sourceCode, Math.max(1, line - 1), line + 1);
+                const confidence = computeConfidence(88, {
+                  lineMatchesEvidence: true,
+                });
                 results.push({
                   type: 'ACCESS_CONTROL',
                   severity: 'HIGH',
@@ -137,6 +231,30 @@ export class AccessControlDetector implements Detector {
                     'code, tx.origin still points at the EOA that initiated the whole ' +
                     'chain, enabling phishing-based privilege escalation (the ' +
                     '"Dark Forest" / tx.origin vulnerability).',
+                  confidence,
+                  evidence: [evidence],
+                  attackPath: buildAttackPath([
+                    {
+                      label: 'ENTRY',
+                      description: 'Victim EOA interacts with a malicious contract',
+                      line,
+                    },
+                    {
+                      label: 'TRIGGER',
+                      description: 'Malicious contract forwards call to the vulnerable contract; tx.origin == victim EOA',
+                      line,
+                    },
+                    {
+                      label: 'EXPLOIT',
+                      description: 'tx.origin == victim EOA passes the auth check — malicious contract executes privileged operation',
+                      line,
+                    },
+                    {
+                      label: 'IMPACT',
+                      description: 'Attacker drains funds / changes ownership via victim\'s EOA identity',
+                      line,
+                    },
+                  ]),
                   lineStart: line,
                   lineEnd: line,
                   columnStart: 0,
@@ -170,49 +288,68 @@ export class AccessControlDetector implements Detector {
           if (['selfdestruct', 'suicide'].includes(calleeName)) {
             const line = nodeLine(n);
             const fn = this.functionAtLine(context, line);
-            const protectedFn =
-              fn &&
-              fn.modifiers.some((m) =>
-                ['onlyOwner', 'onlyRole', 'adminOnly', 'auth'].includes(m.toLowerCase())
-              );
-            if (fn && !protectedFn) {
-              results.push({
-                type: 'SELF_DESTRUCT',
-                severity: 'HIGH',
-                title: 'Unprotected selfdestruct() call',
-                description:
-                  `${fn.name}() can reach a selfdestruct (suicide) instruction without ` +
+            if (!fn) return;
+            const isProtected = fn.modifiers.some((m) =>
+              ['onlyowner', 'onlyrole', 'adminonly', 'auth'].includes(m.toLowerCase())
+            );
+            const evidence = evidenceSnippet(context.sourceCode, Math.max(1, line - 2), line + 2);
+            const confidence = computeConfidence(80, {
+              guardPresent: isProtected,
+              lineMatchesEvidence: true,
+            });
+            results.push({
+              type: 'SELF_DESTRUCT',
+              severity: isProtected ? 'MEDIUM' : 'HIGH',
+              title: isProtected
+                ? 'Protected selfdestruct() call'
+                : 'Unprotected selfdestruct() call',
+              description: isProtected
+                ? `${fn.name}() contains a selfdestruct (suicide) instruction guarded by ` +
+                  'an access-control modifier. While protected, selfdestruct is permanent ' +
+                  'and should be avoided in production — prefer pausing + sweeping.'
+                : `${fn.name}() can reach a selfdestruct (suicide) instruction without ` +
                   'any ownership/role modifier. An attacker could destroy the contract ' +
                   'and recover all remaining ETH.',
-                lineStart: line,
-                lineEnd: line + 2,
-                columnStart: 0,
-                columnEnd: 0,
-                codeSnippet: snippet(context.lines, Math.max(1, line - 2), line + 2),
-                recommendation:
-                  'Gate selfdestruct behind onlyOwner, add a timelock, and prefer ' +
-                  'pausing + sweeping over destruction.',
-                remediatedCode: `    function destroy() public onlyOwner {\n        selfdestruct(payable(owner));\n    }`,
-                references: ['https://swcregistry.io/docs/SWC-106'],
-                swcId: 'SWC-106',
-                cvssScore: cvssFor('HIGH'),
-              });
-            }
+              confidence,
+              evidence: [evidence],
+              attackPath: isProtected
+                ? undefined
+                : buildAttackPath([
+                    {
+                      label: 'ENTRY',
+                      description: `Attacker calls ${fn.name}() which reaches selfdestruct`,
+                      line,
+                    },
+                    {
+                      label: 'TRIGGER',
+                      description: 'No onlyOwner modifier protects the selfdestruct path',
+                      line,
+                    },
+                    {
+                      label: 'EXPLOIT',
+                      description: 'selfdestruct called — contract code and storage destroyed, ETH sent to attacker',
+                      line,
+                    },
+                    {
+                      label: 'IMPACT',
+                      description: 'Contract permanently destroyed — all locked funds irrecoverable',
+                      line,
+                    },
+                  ]),
+              lineStart: line,
+              lineEnd: line + 2,
+              columnStart: 0,
+              columnEnd: 0,
+              codeSnippet: evidence,
+              recommendation:
+                'Gate selfdestruct behind onlyOwner, add a timelock, and prefer ' +
+                'pausing + sweeping over destruction.',
+              remediatedCode: `    function destroy() public onlyOwner {\n        selfdestruct(payable(owner));\n    }`,
+              references: ['https://swcregistry.io/docs/SWC-106'],
+              swcId: 'SWC-106',
+              cvssScore: cvssFor(isProtected ? 'MEDIUM' : 'HIGH'),
+            });
           }
-        }
-      }
-    });
-
-    // 5) fee / parameter setters without restrictions.
-    walkAst(context.ast as unknown, (n) => {
-      if (n.type === 'StateVariableDeclaration') {
-        const vars = n.variables as AstNode[] | undefined;
-        if (!vars) return;
-        for (const v of vars) {
-          const vname = (v.name as string) || '';
-          if (/fee|rate|ratio|admin|owner|implementation/.test(vname.toLowerCase()) === false) continue;
-          // Skip if the variable is read-only/public — only flag assignable ones.
-          // The setter path is covered accurately by the function scan above.
         }
       }
     });

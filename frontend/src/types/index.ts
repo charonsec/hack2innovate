@@ -30,6 +30,9 @@ export interface Vulnerability {
   references: string[];
   swcId: string;
   cvssScore: number;
+  confidence: number;
+  evidence: string[];
+  attackPath?: { label: string; description: string; nodeType?: string; line?: number }[];
 }
 
 export type CFGNodeType = 'ENTRY' | 'EXIT' | 'CONDITION' | 'STATEMENT' | 'CALL' | 'RETURN';
@@ -62,6 +65,67 @@ export interface AuditSummary {
   total: number;
 }
 
+export interface TaintSourceInfo {
+  id: string;
+  variable?: string;
+  source: string;
+  line: number;
+  confidence: string;
+  expression: string;
+}
+
+export interface TaintEdgeInfo {
+  from: string;
+  to: string;
+  sink: string;
+  line: number;
+}
+
+export interface TaintSinkInfo {
+  sink: string;
+  line: number;
+  expression: string;
+}
+
+export interface TaintAnalysisReport {
+  sources: TaintSourceInfo[];
+  edges: TaintEdgeInfo[];
+  sinks: TaintSinkInfo[];
+  summary: string[];
+}
+
+export interface BytecodeOpInfo {
+  pc: number;
+  opcode: string;
+  mnemonic: string;
+  args: number[];
+  isPush: boolean;
+  isDangerous: boolean;
+  danger?: string;
+}
+
+export interface BytecodeFindingInfo {
+  opcode: string;
+  pc: number;
+  severity: string;
+  title: string;
+  description: string;
+}
+
+export interface BytecodeAnalysisInfo {
+  valid: boolean;
+  bytecodeLength: number;
+  instructionCount: number;
+  opcodes: BytecodeOpInfo[];
+  findings: BytecodeFindingInfo[];
+  hasDelegatecall: boolean;
+  hasSelfdestruct: boolean;
+  hasSstore: boolean;
+  hasCallValue: boolean;
+  error?: string;
+  basicBlocks: { start: number; end: number; ops: string[]; summary: string }[];
+}
+
 export interface AuditReport {
   reportId: string;
   contractName: string;
@@ -78,6 +142,8 @@ export interface AuditReport {
   gasOptimizations: GasOptimization[];
   auditScore: number;
   secureTemplate?: string;
+  taintAnalysis?: TaintAnalysisReport;
+  bytecodeAnalysis?: BytecodeAnalysisInfo;
 }
 
 export interface TemplateInfo {

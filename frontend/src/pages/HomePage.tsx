@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
@@ -28,6 +28,16 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input, Label } from '@/components/ui/input';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { cx, formatFileSize } from '@/utils/format.utils';
+
+const API_URL = '/api';
+
+interface DemoInfo {
+  id: string;
+  name: string;
+  category: 'vulnerable' | 'secure';
+  vulnerabilityClasses: string[];
+  sourceCode: string;
+}
 
 const VULN_TABLE = [
   {
@@ -63,7 +73,7 @@ const VULN_TABLE = [
   {
     icon: Droplets,
     name: 'Flash Loan',
-    swc: 'SWC-107',
+    swc: 'N/A',
     desc: 'Unprotected single-transaction borrow surfaces.',
   },
   {
@@ -97,9 +107,32 @@ export function HomePage() {
   const { sourceCode, contractName, setSourceCode, setContractName, setUploadFile, uploadFileName, uploadFileSize } =
     useAuditStore();
   const { startAudit } = useAudit();
+  const errorMessage = useAuditStore((s) => s.errorMessage);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [demos, setDemos] = useState<DemoInfo[]>([]);
+  const [selectedDemo, setSelectedDemo] = useState('');
+
+  useEffect(() => {
+    fetch(`${API_URL}/demos`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: DemoInfo[]) => setDemos(data))
+      .catch(() => {});
+  }, []);
+
+  const handleDemoSelect = useCallback(
+    (demoId: string) => {
+      setSelectedDemo(demoId);
+      const demo = demos.find((d) => d.id === demoId);
+      if (demo) {
+        setSourceCode(demo.sourceCode);
+        setContractName(demo.name);
+        setUploadFile(null, null);
+      }
+    },
+    [demos, setSourceCode, setContractName, setUploadFile]
+  );
 
   const handleFiles = useCallback(
     (files: FileList | null) => {
@@ -183,6 +216,43 @@ export function HomePage() {
                 </div>
               </div>
 
+              {demos.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="demo-select" className="text-xs text-textSecondary">
+                    Quick demo
+                  </Label>
+                  <select
+                    id="demo-select"
+                    value={selectedDemo}
+                    onChange={(e) => handleDemoSelect(e.target.value)}
+                    className="w-full rounded-md border border-[#2A2D35] bg-surface px-3 py-2 font-mono text-sm text-textPrimary outline-none focus:border-[#00FF88]/60"
+                  >
+                    <option value="">Load demo contract...</option>
+                    <optgroup label="Vulnerable">
+                      {demos
+                        .filter((d) => d.category === 'vulnerable')
+                        .map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name} — {d.vulnerabilityClasses.join(', ')}
+                          </option>
+                        ))}
+                    </optgroup>
+                    <optgroup label="Secure">
+                      {demos
+                        .filter((d) => d.category === 'secure')
+                        .map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                    </optgroup>
+                  </select>
+                  <p className="text-[11px] text-textSecondary/60">
+                    One-click demo: load a vulnerable contract, then click Run Security Audit.
+                  </p>
+                </div>
+              )}
+
               <div className="flex flex-col items-start justify-between gap-3 rounded-lg border border-dashed border-[#2A2D35] bg-surface p-4 sm:flex-row sm:items-center"
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
@@ -242,6 +312,19 @@ export function HomePage() {
             </div>
           </CardContent>
         </Card>
+
+        {errorMessage && (
+          <div className="flex items-center gap-2 rounded-lg border border-critical/30 bg-critical/5 px-4 py-3 text-sm text-critical">
+            <AlertCircle size={16} />
+            <span>{errorMessage}</span>
+            <button
+              onClick={() => useAuditStore.setState({ errorMessage: null })}
+              className="ml-auto text-xs opacity-60 hover:opacity-100"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <FeatureCard

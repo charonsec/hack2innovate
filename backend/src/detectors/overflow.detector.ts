@@ -14,6 +14,7 @@ import {
   walkAst,
   AstNode,
 } from '../engine/detector-utils';
+import { computeConfidence, buildAttackPath, evidenceSnippet } from '../engine/confidence';
 
 const UINT_TYPES = [
   'uint', 'uint8', 'uint16', 'uint24', 'uint32', 'uint40', 'uint48', 'uint56',
@@ -47,12 +48,26 @@ export class OverflowDetector implements Detector {
       /unchecked\s*\{[\s\S]*?\}/g
     );
     if (uncheckedBlocks && uncheckedBlocks.length) {
+      let searchOffset = 0;
       for (const block of uncheckedBlocks) {
+        // Find the line of THIS specific unchecked block, not always the first one.
+        const matchIdx = context.sourceCode.indexOf(block, searchOffset);
+        if (matchIdx < 0) continue;
+        searchOffset = matchIdx + block.length;
+
         const lineNo =
-          context.sourceCode.split('\n').findIndex((l) => l.includes('unchecked')) + 1;
+          context.sourceCode.substring(0, matchIdx).split('\n').length;
         if (lineNo <= 0) continue;
         const hasArithmetic = /[+*/-]/.test(block.replace(/[=;{}]/g, ''));
         if (hasArithmetic) {
+          const financialImpact = this.hasFinancialImpact(context, lineNo);
+          const confidence = computeConfidence(85, { financialImpact });
+          const evidence: string[] = [
+            evidenceSnippet(context.sourceCode, lineNo, lineNo),
+          ];
+          if (financialImpact) {
+            evidence.push('Function modifies balance/price state variables');
+          }
           results.push({
             type: 'INTEGER_OVERFLOW',
             severity: 'HIGH',
@@ -62,6 +77,26 @@ export class OverflowDetector implements Detector {
               'and underflow checks on every arithmetic operation inside it. If the ' +
               'inputs exceed the type bounds the value silently wraps, enabling ' +
               'price / balance manipulation.',
+            confidence,
+            evidence,
+            attackPath: buildAttackPath([
+              {
+                label: 'Attacker provides extreme input',
+                description: 'Supply a value that pushes arithmetic past uint256 bounds',
+              },
+              {
+                label: 'Unchecked arithmetic wraps silently',
+                description: 'The unchecked block suppresses the Solidity 0.8 overflow revert',
+              },
+              {
+                label: 'Wrapped value stored in state',
+                description: 'The corrupted result is written to a balance or price slot',
+              },
+              {
+                label: 'Attacker extracts value',
+                description: 'Use the manipulated state to withdraw or borrow excess funds',
+              },
+            ]),
             lineStart: lineNo,
             lineEnd: lineNo,
             columnStart: 0,
@@ -87,6 +122,7 @@ export class OverflowDetector implements Detector {
     }
 
     // solc >= 0.8.0 has built-in overflow protection outside unchecked blocks.
+    // Arithmetic in >=0.8.0 outside unchecked{} is SAFE — skip it.
 
     // Only analyze <0.8.0 contracts without SafeMath for implicit arithmetic.
     const preEight = this.isPre080(context.solidityVersion);
@@ -105,6 +141,8 @@ export class OverflowDetector implements Detector {
           continue;
         }
 
+        const inferredTypes = !UINT_TYPES.includes(typeDetected) && !INT_TYPES.includes(typeDetected);
+        const financialImpact = this.hasFinancialImpact(context, line);
         const sev = operator === '+' && UINT_TYPES.includes(typeDetected)
           ? 'HIGH'
           : 'MEDIUM';
@@ -114,6 +152,15 @@ export class OverflowDetector implements Detector {
             : ('INTEGER_OVERFLOW' as VulnerabilityType);
 
         const surrounding = snippet(context.lines, Math.max(1, line - 1), line + 1);
+        const confidence = computeConfidence(70, { inferredTypes, financialImpact });
+        const evidence: string[] = [
+          evidenceSnippet(context.sourceCode, line, line),
+          `Operator '${operator}' applied to ${typeDetected} without SafeMath (solc ${context.solidityVersion})`,
+        ];
+        if (financialImpact) {
+          evidence.push('Function modifies balance/price state variables');
+        }
+
         results.push({
           type: vulnType,
           severity: sev,
@@ -126,6 +173,26 @@ export class OverflowDetector implements Detector {
             `without SafeMath while the contract targets Solidity ${context.solidityVersion}. ` +
             'Solc < 0.8.0 silently wraps overflowing arithmetic on uint/int types, letting ' +
             'an attacker drive balances, allowances, and totals to unintended values.',
+          confidence,
+          evidence,
+          attackPath: buildAttackPath([
+            {
+              label: 'Contract compiled with solc < 0.8.0',
+              description: `Target version ${context.solidityVersion} has no built-in overflow checks`,
+            },
+            {
+              label: 'Arithmetic without SafeMath',
+              description: `The '${operator}' operator on ${typeDetected} silently wraps on overflow`,
+            },
+            {
+              label: 'Attacker triggers overflow',
+              description: 'Craft calldata that pushes the arithmetic past the type boundary',
+            },
+            {
+              label: 'Corrupted value persisted',
+              description: 'The wrapped result is written to storage, corrupting balances or totals',
+            },
+          ]),
           lineStart: line,
           lineEnd: line,
           columnStart: 0,
@@ -152,6 +219,18 @@ export class OverflowDetector implements Detector {
     if (!m) return false;
     const [major, minor] = [parseInt(m[1], 10), parseInt(m[2], 10)];
     return major < 0 || (major === 0 && minor < 8);
+  }
+
+  private hasFinancialImpact(context: DetectorContext, line: number): boolean {
+    const financialNames = /balance|price|total|amount|reserve|supply|debt|collateral|treasury|fee/i;
+    // Scan enclosing function for state variable writes involving financial names.
+    const start = Math.max(0, line - 40);
+    const end = Math.min(context.lines.length, line + 10);
+    const window = context.lines.slice(start, end).join('\n');
+    return (
+      financialNames.test(window) &&
+      /=\s*[a-zA-Z]|balanceOf|totalSupply|price|reserve/.test(window)
+    );
   }
 
   private collectArithmetic(context: DetectorContext): AstNode[] {

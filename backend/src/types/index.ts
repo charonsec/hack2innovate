@@ -27,6 +27,9 @@ export interface Vulnerability {
   severity: Severity;
   title: string;
   description: string;
+  confidence: number;
+  evidence: string[];
+  attackPath?: AttackPathStep[];
   lineStart: number;
   lineEnd: number;
   columnStart: number;
@@ -69,6 +72,35 @@ export interface AuditSummary {
   total: number;
 }
 
+export interface TaintSourceInfo {
+  id: string;
+  variable?: string;
+  source: string;
+  line: number;
+  confidence: string;
+  expression: string;
+}
+
+export interface TaintEdgeInfo {
+  from: string;
+  to: string;
+  sink: string;
+  line: number;
+}
+
+export interface TaintSinkInfo {
+  sink: string;
+  line: number;
+  expression: string;
+}
+
+export interface TaintAnalysisReport {
+  sources: TaintSourceInfo[];
+  edges: TaintEdgeInfo[];
+  sinks: TaintSinkInfo[];
+  summary: string[];
+}
+
 export interface AuditReport {
   reportId: string;
   contractName: string;
@@ -85,6 +117,8 @@ export interface AuditReport {
   gasOptimizations: GasOptimization[];
   auditScore: number;
   secureTemplate?: string;
+  bytecodeAnalysis?: BytecodeAnalysis;
+  taintAnalysis?: TaintAnalysisReport;
 }
 
 export interface FunctionInfo {
@@ -122,11 +156,21 @@ export interface DetectorContext {
   ast?: unknown;
 }
 
+export interface AttackPathStep {
+  label: string;
+  description: string;
+  nodeType?: string;
+  line?: number;
+}
+
 export interface DetectorResult {
   type: VulnerabilityType;
   severity: Severity;
   title: string;
   description: string;
+  confidence: number;
+  evidence: string[];
+  attackPath?: AttackPathStep[];
   lineStart: number;
   lineEnd: number;
   columnStart: number;
@@ -144,6 +188,12 @@ export interface Detector {
   detect(context: DetectorContext): DetectorResult[];
 }
 
+export interface DetectorOutcome {
+  confidence: number;
+  evidence: string[];
+  attackPath?: AttackPathStep[];
+}
+
 export interface WSMessage {
   stage: 'PARSING' | 'CFG_BUILD' | 'DETECTING' | 'REMEDIATING' | 'COMPLETE' | 'ERROR';
   progress: number;
@@ -159,6 +209,14 @@ export interface TemplateInfo {
   sourceCode: string;
 }
 
+export interface DemoInfo {
+  id: string;
+  name: string;
+  category: 'vulnerable' | 'secure';
+  vulnerabilityClasses: string[];
+  sourceCode: string;
+}
+
 export interface DiffResult {
   originalCode: string;
   fixedCode: string;
@@ -166,4 +224,44 @@ export interface DiffResult {
   addedImports: string[];
   addedModifiers: string[];
   changedFunctions: string[];
+}
+
+export interface BytecodeOp {
+  pc: number;
+  opcode: string;
+  mnemonic: string;
+  args: number[];
+  isPush: boolean;
+  isDangerous: boolean;
+  danger?: string;
+}
+
+export interface BytecodeFinding {
+  opcode: string;
+  pc: number;
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  title: string;
+  description: string;
+}
+
+export interface BasicBlock {
+  start: number;
+  end: number;
+  ops: string[];
+  summary: string;
+}
+
+export interface BytecodeAnalysis {
+  valid: boolean;
+  bytecodeLength: number;
+  error?: string;
+  instructionCount: number;
+  pushconstantCount: number;
+  opcodes: BytecodeOp[];
+  findings: BytecodeFinding[];
+  hasDelegatecall: boolean;
+  hasSelfdestruct: boolean;
+  hasSstore: boolean;
+  hasCallValue: boolean;
+  basicBlocks: BasicBlock[];
 }

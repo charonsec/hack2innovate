@@ -61,6 +61,7 @@ export function createApplication(): { app: Express; server: http.Server; wss: W
         'POST /api/upload',
         'GET /api/report/:id',
         'GET /api/templates',
+        'GET /api/demos',
         'GET /api/health',
         'WS /ws',
       ],

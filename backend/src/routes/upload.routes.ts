@@ -4,8 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { runAudit, ProgressCallback } from '../engine/analyzer';
 import { AuditReport } from '../types/index';
 import { broadcast } from '../wsHub';
-
-const reportStore = new Map<string, AuditReport>();
+import { reportStore } from './audit.routes';
 
 const storage = multer.memoryStorage();
 const upload = multer({

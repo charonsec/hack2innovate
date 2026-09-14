@@ -2,8 +2,10 @@ import {
   Detector,
   DetectorContext,
   DetectorResult,
+  Severity,
   VulnerabilityType,
 } from '../types/index';
+import { computeConfidence, buildAttackPath, evidenceSnippet } from '../engine/confidence';
 import {
   AstNode,
   buildId,
@@ -12,7 +14,6 @@ import {
   memberCallInfo,
   nodeLine,
   nodeEndLine,
-  snippet,
   walkAst,
 } from '../engine/detector-utils';
 
@@ -24,6 +25,26 @@ import {
  * .transfer(), .send() as well as high-level interface calls where the return
  * value feeds a require/revert (indicating ETH/ERC transfer style calls).
  */
+
+function resolveTargetName(node: AstNode | undefined): string {
+  if (!node) return '';
+  if (node.type === 'Identifier') return (node.name as string) || '';
+  if (node.type === 'IndexAccess') {
+    return resolveTargetName(node.base as AstNode);
+  }
+  if (node.type === 'MemberAccess') {
+    const base = resolveTargetName(node.expression as AstNode);
+    const member = (node.memberName as string) || '';
+    return base ? `${base}.${member}` : member;
+  }
+  if (node.type === 'TupleExpression') {
+    const comps = node.components as AstNode[];
+    if (Array.isArray(comps) && comps.length > 0) {
+      return resolveTargetName(comps[0]);
+    }
+  }
+  return '';
+}
 export class ReentrancyDetector implements Detector {
   name = 'reentrancy';
 
@@ -43,7 +64,6 @@ export class ReentrancyDetector implements Detector {
         : [];
 
       if (modifiers.includes('nonReentrant')) continue;
-      if (context.usesReentrancyGuard) continue;
 
       const body = fn.body as AstNode | undefined;
       if (!body) continue;
@@ -99,8 +119,7 @@ export class ReentrancyDetector implements Detector {
           const op = n.operator as string;
           if (['+=', '-=', '*=', '/='].includes(op)) {
             const left = n.left as AstNode | undefined;
-            const target =
-              left && left.type === 'Identifier' ? (left.name as string) : '';
+            const target = resolveTargetName(left);
             if (target) {
               events.push({
                 line: nodeLine(n),
@@ -113,11 +132,12 @@ export class ReentrancyDetector implements Detector {
 
         if (n.type === 'Assignment') {
           const left = n.left as AstNode | undefined;
-          if (left && left.type === 'Identifier') {
+          const target = resolveTargetName(left);
+          if (target) {
             events.push({
               line: nodeLine(n),
               kind: 'STATE_WRITE',
-              targetState: left.name as string,
+              targetState: target,
             });
           }
         }
@@ -130,10 +150,23 @@ export class ReentrancyDetector implements Detector {
         }
       });
 
+      // Deduplicate ordered events by line+kind — the same external call can be
+      // matched by both the low-level member branch and the high-level interface
+      // branch, which would otherwise produce duplicate EXT_CALL entries.
+      const seenEvents = new Set<string>();
+      const uniqueEvents: OrderedEvent[] = [];
+      for (const ev of events) {
+        const key = `${ev.kind}:${ev.line}`;
+        if (!seenEvents.has(key)) {
+          seenEvents.add(key);
+          uniqueEvents.push(ev);
+        }
+      }
+
       // CEI pattern check: find an EXT_CALL followed by a STATE_WRITE.
       let pendingCallLine = -1;
       let stateWriteAfter: OrderedEvent | null = null;
-      for (const ev of events) {
+      for (const ev of uniqueEvents) {
         if (ev.kind === 'EXT_CALL') {
           pendingCallLine = ev.line;
         } else if (ev.kind === 'STATE_WRITE' && pendingCallLine !== -1) {
@@ -144,30 +177,79 @@ export class ReentrancyDetector implements Detector {
         }
       }
 
-      const guardedRequire = context.usesReentrancyGuard;
-      if (stateWriteAfter && !guardedRequire) {
+      const hasGuard = context.usesReentrancyGuard;
+      if (stateWriteAfter) {
         const startLine = nodeLine(fn);
         const endLine = nodeEndLine(fn);
-        const codeSnippet = snippet(context.lines, startLine, endLine);
-        const fixed =
-          this.buildFixedCode(
-            context,
-            fnName,
-            modifiers,
-            startLine,
-            endLine
+        const codeSnippet = evidenceSnippet(context.sourceCode, startLine, endLine);
+        const fixed = this.buildFixedCode(
+          context,
+          fnName,
+          modifiers,
+          startLine,
+          endLine
+        );
+
+        const callSnippet = evidenceSnippet(
+          context.sourceCode,
+          pendingCallLine,
+          pendingCallLine
+        )
+          .replace(/\s+/g, ' ')
+          .slice(0, 80);
+
+        const severity: Severity = hasGuard ? 'HIGH' : 'CRITICAL';
+        const baseConfidence = hasGuard ? 60 : 90;
+
+        const evidence: string[] = [
+          `External call ${callSnippet} at line ${pendingCallLine} precedes state write at line ${stateWriteAfter.line}`,
+          `Function ${fnName} is externally callable`,
+        ];
+        if (hasGuard) {
+          evidence.push(
+            `ReentrancyGuard is imported but the nonReentrant modifier is not applied to function ${fnName}`
           );
+        } else {
+          evidence.push('No ReentrancyGuard imported — contract has no reentrancy protection');
+        }
+
+        const attackPath = buildAttackPath([
+          {
+            label: 'Attacker calls function',
+            description: `Externally callable function '${fnName}' at line ${startLine}`,
+          },
+          {
+            label: 'Balance checked',
+            description: 'Pre-condition / balance requirement passes',
+          },
+          {
+            label: 'External call to attacker',
+            description: `${callSnippet} — control transferred to attacker`,
+          },
+          {
+            label: 'Attacker re-enters',
+            description: `fallback() or receive() calls ${fnName}() again before state is updated at line ${stateWriteAfter.line}`,
+          },
+          {
+            label: 'Balance reused',
+            description: `State variable '${stateWriteAfter.targetState || 'storage'}' not yet updated → double execution`,
+          },
+          {
+            label: 'Funds drained',
+            description: 'Recursive re-entry drains contract state before it is committed',
+          },
+        ]);
 
         results.push({
           type: 'REENTRANCY' as VulnerabilityType,
-          severity: 'CRITICAL',
+          severity,
           title: `Reentrancy Attack in ${fnName}()`,
           description:
             'External call(s) are executed before internal state is updated. ' +
             'This violates the Checks-Effects-Interactions (CEI) pattern. An attacker ' +
             'can re-enter the same function recursively through a malicious fallback ' +
             'and drain the contract because balances are only subtracted after the call.',
-          lineStart: stateWriteAfter.line,
+          lineStart: pendingCallLine,
           lineEnd: endLine,
           columnStart: 0,
           columnEnd: 0,
@@ -184,12 +266,19 @@ export class ReentrancyDetector implements Detector {
             'https://ethereum.org/en/developers/tutorials/secure-development-workflow/',
           ],
           swcId: 'SWC-107',
-          cvssScore: cvssFor('CRITICAL'),
+          cvssScore: cvssFor(severity),
+          confidence: computeConfidence(baseConfidence, {
+            lineMatchesEvidence: true,
+            crossFunction: true,
+            financialImpact: true,
+          }),
+          evidence,
+          attackPath,
         });
 
         results.push({
           type: 'REENTRANCY',
-          severity: 'CRITICAL',
+          severity: hasGuard ? 'MEDIUM' : 'CRITICAL',
           title: 'Missing ReentrancyGuard on state-changing function',
           description:
             `${fnName}() performs an external interaction without a reentrancy ` +
@@ -199,7 +288,11 @@ export class ReentrancyDetector implements Detector {
           lineEnd: endLine,
           columnStart: 0,
           columnEnd: 0,
-          codeSnippet: snippet(context.lines, startLine, Math.min(startLine + 4, endLine)),
+          codeSnippet: evidenceSnippet(
+            context.sourceCode,
+            startLine,
+            Math.min(startLine + 4, endLine)
+          ),
           recommendation:
             'Import "@openzeppelin/contracts/security/ReentrancyGuard.sol", inherit ' +
             'ReentrancyGuard and add the nonReentrant modifier to every function that ' +
@@ -207,7 +300,20 @@ export class ReentrancyDetector implements Detector {
           remediatedCode: fixed,
           references: ['https://swcregistry.io/docs/SWC-107'],
           swcId: 'SWC-107',
-          cvssScore: cvssFor('CRITICAL', -0.8),
+          cvssScore: cvssFor(hasGuard ? 'MEDIUM' : 'CRITICAL'),
+          confidence: computeConfidence(hasGuard ? 70 : 80, {
+            lineMatchesEvidence: true,
+          }),
+          evidence: hasGuard
+            ? [
+                `ReentrancyGuard is imported but nonReentrant modifier not applied to function ${fnName}`,
+                `Function ${fnName} performs external calls without guard protection`,
+              ]
+            : [
+                'No ReentrancyGuard imported in contract',
+                `Function ${fnName} performs external calls without any reentrancy protection`,
+              ],
+          attackPath,
         });
       }
     }

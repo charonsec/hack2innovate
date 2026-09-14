@@ -19,15 +19,15 @@ export function ReportPage() {
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    if (reportId && !report) {
-      setLoading(true);
-      fetchReport(reportId)
-        .then((remote) => {
-          if (!remote) setNotFound(true);
-        })
-        .finally(() => setLoading(false));
-    }
-  }, [reportId, report, fetchReport]);
+    if (!reportId) return;
+    setLoading(true);
+    setNotFound(false);
+    fetchReport(reportId)
+      .then((remote) => {
+        if (!remote) setNotFound(true);
+      })
+      .finally(() => setLoading(false));
+  }, [reportId, fetchReport]);
 
   useEffect(() => {
     if (!report) return;

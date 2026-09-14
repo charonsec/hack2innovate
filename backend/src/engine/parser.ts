@@ -17,6 +17,15 @@ interface NodeWithLoc {
 const SKIP_KEYS = new Set(['loc', 'range', 'tokens', 'comments', 'parent']);
 const SKIP_TYPES = new Set(['loc', 'range', 'token', 'comment']);
 
+export type CallKind = 'internal' | 'external' | 'lowlevel' | 'delegatecall';
+
+export interface CallGraphEdge {
+  from: string;
+  to: string;
+  kind: CallKind;
+  line: number;
+}
+
 function isNodeValue(value: unknown): value is NodeWithLoc {
   return (
     typeof value === 'object' &&
@@ -208,6 +217,49 @@ export class Parser {
     return 'unknown';
   }
 
+  /**
+   * Resolve the callee of a FunctionCall node into a name and a call kind.
+   * Handles plain Identifier callees (incl. `selfdestruct`/`suicide` builtins),
+   * MemberAccess callees (this.foo(), token.transfer(), lib.foo()), and the
+   * NameValueExpression wrapper used by the newer parser for call{value: x}().
+   */
+  private resolveCall(
+    callee: NodeWithLoc | undefined
+  ): { name: string; kind: CallKind } | null {
+    if (!callee) return null;
+    let expr = callee;
+    // Newer parser wraps `addr.call{value: 1}()` as a NameValueExpression
+    // inside FunctionCall.expression.
+    if (expr.type === 'NameValueExpression') {
+      const inner = expr.expression as NodeWithLoc | undefined;
+      if (!inner) return null;
+      expr = inner;
+    }
+    if (expr.type === 'Identifier') {
+      const name = (expr.name as string) || '';
+      if (name === 'selfdestruct' || name === 'suicide') {
+        return { name, kind: 'lowlevel' };
+      }
+      return { name, kind: 'internal' };
+    }
+    if (expr.type === 'MemberAccess') {
+      const member = (expr.memberName as string) || '';
+      if (member === 'delegatecall') {
+        return { name: member, kind: 'delegatecall' };
+      }
+      if (
+        member === 'call' ||
+        member === 'staticcall' ||
+        member === 'send' ||
+        member === 'transfer'
+      ) {
+        return { name: member, kind: 'lowlevel' };
+      }
+      return { name: member, kind: 'external' };
+    }
+    return null;
+  }
+
   buildFunctionCallGraph(astRoot: NodeWithLoc): Map<string, string[]> {
     const graph = new Map<string, string[]>();
     const fnNodes = findNodesAst(astRoot, 'FunctionDefinition');
@@ -219,17 +271,34 @@ export class Parser {
       const name = (fn.name as string) || 'constructor';
       const targets = new Set<string>();
       walk(fn, (n) => {
-        if (n.type === 'FunctionCall') {
-          const callee = n.expression as NodeWithLoc | undefined;
-          if (callee && callee.type === 'Identifier') {
-            const calleeName = callee.name as string;
-            if (graph.has(calleeName)) targets.add(calleeName);
-          }
-        }
+        if (n.type !== 'FunctionCall') return;
+        const call = this.resolveCall(n.expression as NodeWithLoc | undefined);
+        if (call) targets.add(call.name);
       });
       graph.set(name, Array.from(targets));
     }
     return graph;
+  }
+
+  /**
+   * Build a typed edge list of every call site within each function, grouped by
+   * `from` function, distinguishing internal vs external vs low-level vs
+   * delegatecall. Powers the Call Graph tab in the UI.
+   */
+  buildCallGraphDetailed(astRoot: NodeWithLoc): CallGraphEdge[] {
+    const edges: CallGraphEdge[] = [];
+    const fnNodes = findNodesAst(astRoot, 'FunctionDefinition');
+    for (const fn of fnNodes) {
+      const from = (fn.name as string) || 'constructor';
+      walk(fn, (n) => {
+        if (n.type !== 'FunctionCall') return;
+        const call = this.resolveCall(n.expression as NodeWithLoc | undefined);
+        if (call) {
+          edges.push({ from, to: call.name, kind: call.kind, line: lineOf(n) });
+        }
+      });
+    }
+    return edges;
   }
 
   getAstObject(): object {
@@ -281,7 +350,7 @@ export class Parser {
         found = true;
         void op;
       }
-      if (n.type === 'BinaryOperation') {
+      if (n.type === 'Assignment') {
         const op = n.operator as string;
         if (['+=', '-=', '*=', '/=', '**='].includes(op)) found = true;
       }
@@ -349,5 +418,6 @@ export function parseSolidity(sourceCode: string) {
     events: p.extractEvents(ast),
     solidityVersion: p.detectSolidityVersion(ast),
     functionCallGraph: p.buildFunctionCallGraph(ast),
+    callGraphDetailed: p.buildCallGraphDetailed(ast),
   };
 }

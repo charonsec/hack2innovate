@@ -90,6 +90,18 @@ async function main(): Promise<void> {
     );
   }
   console.log('=== TEMPLATE LENGTH ===', report.secureTemplate?.length ?? 0);
+  console.log('=== TAINT ===');
+  if (report.taintAnalysis) {
+    console.log('  sources:', report.taintAnalysis.sources.length);
+    for (const s of report.taintAnalysis.sources.slice(0, 15)) {
+      console.log(`    [${s.confidence}] ${s.source} ${s.variable || ''} L${s.line}`);
+    }
+    console.log('  edges:', report.taintAnalysis.edges.length);
+    console.log('  sinks:', report.taintAnalysis.sinks.length);
+    for (const k of report.taintAnalysis.sinks.slice(0, 15)) {
+      console.log(`    ${k.sink} L${k.line} :: ${k.expression}`);
+    }
+  }
 }
 
 main().catch((e) => {

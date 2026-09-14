@@ -4,6 +4,7 @@ import {
   AuditSummary,
   CFGNode,
   DetectorContext,
+  DetectorResult,
   FunctionInfo,
   Severity,
   StateVariableInfo,
@@ -14,6 +15,8 @@ import { Parser } from './parser';
 import { buildCFG } from './cfg';
 import { detectGasOptimizations } from './gas';
 import { generateSecureVersion } from './remediator';
+import { analyzeBytecode } from './bytecode';
+import { buildTaintAnalysis, TaintAnalysis } from './taint';
 import {
   ReentrancyDetector,
 } from '../detectors/reentrancy.detector';
@@ -41,6 +44,7 @@ export interface AuditOptions {
   sourceCode: string;
   contractAddress?: string;
   network?: string;
+  bytecode?: string;
   onProgress?: ProgressCallback;
 }
 
@@ -144,7 +148,10 @@ export class Analyzer {
     // Phase 1: Parse.
     await sleep(30);
     const parser = new Parser(sourceCode);
-    const ast = parser.parseAstSafe() ?? parser.parse();
+    const ast = parser.parseAstSafe();
+    if (!ast) {
+      throw new Error('Failed to parse Solidity source code. Check syntax and compiler version.');
+    }
     const functions: FunctionInfo[] = parser.extractFunctions(ast);
     const stateVariables: StateVariableInfo[] = parser.extractStateVariables(ast);
     const solidityVersion = parser.detectSolidityVersion(ast);
@@ -172,6 +179,16 @@ export class Analyzer {
     const cfg: CFGNode[] = buildCFG(ast, rawVulnerabilities);
     emit('CFG_BUILD', 60, `CFG built: ${cfg.length} nodes`, { nodes: cfg.length });
 
+    // Phase: Taint / Data-Flow Analysis.
+    emit('DETECTING', 66, 'Running taint / data-flow analysis...');
+    let taintResult: TaintAnalysis | undefined;
+    try {
+      taintResult = buildTaintAnalysis(sourceCode, ast, context);
+      emit('DETECTING', 69, `Taint analysis complete: ${taintResult.sources.length} sources, ${taintResult.sinks.length} sinks, ${taintResult.edges.length} edges`);
+    } catch (e) {
+      emit('DETECTING', 69, `Taint analysis failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     // Phase: Detection.
     emit('DETECTING', 70, 'Applying rule engine across '+ functions.length +' functions...');
 
@@ -189,6 +206,12 @@ export class Analyzer {
     const summary = summarizeVulnerabilities(rawVulnerabilities);
     const risk = computeRiskScore(summary);
     const auditScore = computeAuditScore(summary);
+
+    let bytecodeAnalysis;
+    if (this.options.bytecode) {
+      bytecodeAnalysis = analyzeBytecode(this.options.bytecode);
+      emit('DETECTING', 78, `Bytecode analysis complete: ${bytecodeAnalysis.instructionCount} instructions, ${bytecodeAnalysis.findings.length} findings`);
+    }
 
     await sleep(25);
 
@@ -213,6 +236,17 @@ export class Analyzer {
       gasOptimizations,
       auditScore,
       secureTemplate,
+      ...(bytecodeAnalysis ? { bytecodeAnalysis } : {}),
+      ...(taintResult
+        ? {
+            taintAnalysis: {
+              sources: taintResult.sources,
+              edges: taintResult.edges,
+              sinks: taintResult.sinks,
+              summary: taintResult.summary,
+            },
+          }
+        : {}),
     };
   }
 
@@ -263,22 +297,7 @@ export class Analyzer {
   }
 
   private toVulnerability(
-    r: {
-      type: VulnerabilityType;
-      severity: Severity;
-      title: string;
-      description: string;
-      lineStart: number;
-      lineEnd: number;
-      columnStart: number;
-      columnEnd: number;
-      codeSnippet: string;
-      recommendation: string;
-      remediatedCode: string;
-      references: string[];
-      swcId: string;
-      cvssScore: number;
-    },
+    r: DetectorResult,
     index: number
   ): Vulnerability {
     return {
@@ -287,6 +306,9 @@ export class Analyzer {
       severity: r.severity,
       title: r.title,
       description: r.description,
+      confidence: r.confidence,
+      evidence: r.evidence,
+      attackPath: r.attackPath,
       lineStart: r.lineStart,
       lineEnd: r.lineEnd,
       columnStart: r.columnStart,

@@ -15,6 +15,7 @@ import {
   snippet,
   walkAst,
 } from '../engine/detector-utils';
+import { computeConfidence, buildAttackPath, evidenceSnippet } from '../engine/confidence';
 
 /**
  * DETECTOR 4 — Unchecked low-level call return values (SWC-104)
@@ -43,13 +44,14 @@ export class UncheckedCallsDetector implements Detector {
 
       if (!lowLevel && !highLevelTransfer) continue;
 
+      const line = nodeLine(call);
       const checkLine = this.findStatementAncestor(call);
       const statementRange = this.statementRange(context, checkLine);
       const usedInRequire = this.isChecked(context, checkLine);
+      const wrappedInTryCatch = this.isWrappedInTryCatch(context, line);
 
       if (usedInRequire) continue;
 
-      const line = nodeLine(call);
       const callCode = this.lineSnippet(context, line);
 
       const sev = member === 'delegatecall' ? 'CRITICAL' : 'HIGH';
@@ -57,6 +59,32 @@ export class UncheckedCallsDetector implements Detector {
         member === 'delegatecall'
           ? 'DELEGATECALL'
           : 'UNCHECKED_RETURN';
+
+      // Confidence based on call type
+      let baseConfidence: number;
+      if (member === 'call' || member === 'delegatecall' || member === 'staticcall') {
+        baseConfidence = 90;
+      } else if (member === 'send') {
+        baseConfidence = 85;
+      } else {
+        // transfer/transferFrom — only flag if vault/accounting inconsistency plausible
+        baseConfidence = 55;
+      }
+
+      const confidence = computeConfidence(baseConfidence, {
+        handledException: wrappedInTryCatch,
+      });
+
+      const evidence: string[] = [
+        evidenceSnippet(context.sourceCode, line, line),
+        `Return value of ${member}() is not consumed by require/assert/if`,
+      ];
+      if (wrappedInTryCatch) {
+        evidence.push('Call is wrapped in try/catch — return may be intentionally ignored');
+      }
+      if (member === 'transfer') {
+        evidence.push('High-level transfer reverts on failure in modern Solidity; low confidence unless vault inconsistency is plausible');
+      }
 
       results.push({
         type,
@@ -75,6 +103,41 @@ export class UncheckedCallsDetector implements Detector {
               'failure the caller continues executing with corrupted assumptions — ' +
               'ETH/send calls report failure as a false boolean, and token transfer ' +
               'functions that revert still consume the call.',
+        confidence,
+        evidence,
+        attackPath: member === 'delegatecall'
+          ? buildAttackPath([
+              {
+                label: 'Attacker supplies malicious contract address',
+                description: 'The delegatecall target address is user-controlled or mutable',
+              },
+              {
+                label: 'Malicious code executes in caller storage context',
+                description: 'delegatecall runs the target\'s bytecode against the caller\'s storage slots',
+              },
+              {
+                label: 'Return value ignored',
+                description: 'Failed delegatecall is not detected; contract continues with corrupted state',
+              },
+              {
+                label: 'Attacker drains funds or takes ownership',
+                description: 'Overwritten storage slots grant asset access or admin control',
+              },
+            ])
+          : buildAttackPath([
+              {
+                label: 'External call fails silently',
+                description: `${member}() returns false/reverts but the return value is not checked`,
+              },
+              {
+                label: 'Contract continues with stale state',
+                description: 'Execution assumes the call succeeded; balances/allowances are stale',
+              },
+              {
+                label: 'Attacker exploits stale assumptions',
+                description: 'Subsequent logic uses the corrupted state to release funds or permissions',
+              },
+            ]),
         lineStart: line,
         lineEnd: line + 1,
         columnStart: 0,
@@ -119,7 +182,28 @@ export class UncheckedCallsDetector implements Detector {
     return true;
   }
 
+  /**
+   * Walks up the AST to find the enclosing statement node for a given call.
+   * Falls back to the call's own line if no statement ancestor is found in the
+   * AST (e.g. when the call is at the top level of a block).
+   */
   private findStatementAncestor(call: AstNode): number {
+    // Walk parent pointers to find the nearest Statement-type ancestor.
+    let current: AstNode | undefined = call as AstNode;
+    while (current) {
+      if (
+        current.type === 'IfStatement' ||
+        current.type === 'ExpressionStatement' ||
+        current.type === 'ReturnStatement' ||
+        current.type === 'Block' ||
+        current.type === 'ForStatement' ||
+        current.type === 'WhileStatement'
+      ) {
+        return nodeLine(current);
+      }
+      current = current._parent as AstNode | undefined;
+    }
+    // Fallback: the call's own line.
     return nodeLine(call);
   }
 
@@ -131,6 +215,19 @@ export class UncheckedCallsDetector implements Detector {
     return snippet(context.lines, Math.max(1, line - 1), line + 1);
   }
 
+  /**
+   * Detects whether the call is wrapped in a try/catch block, which means the
+   * developer intentionally handles the exception.
+   */
+  private isWrappedInTryCatch(context: DetectorContext, line: number): boolean {
+    // Look backwards from the call line for a try statement
+    for (let i = Math.max(0, line - 5); i < Math.min(context.lines.length, line); i++) {
+      const ln = context.lines[i] || '';
+      if (/\btry\s*\b/.test(ln)) return true;
+    }
+    return false;
+  }
+
   private isChecked(context: DetectorContext, line: number): boolean {
     // Scan enclosing block (up to 12 lines around) for require/assert/if that
     // references the success boolean or the same variable.
@@ -139,10 +236,12 @@ export class UncheckedCallsDetector implements Detector {
     const windowText = context.lines.slice(start - 1, end).join('\n');
     const stripped = windowText.replace(/\/\/.*$/gm, '');
     return (
-      /require\s*\(\s*(success|ok|sent|ret)/.test(stripped) ||
+      /require\s*\(\s*(success|ok|sent|ret|result)\b/.test(stripped) ||
       /require\s*\(\s*[^)]*,\s*["']/.test(stripped) ||
-      /if\s*\(\s*!(success|ok|sent|ret)\s*\)\s*revert/.test(stripped) ||
-      /assert\s*\(\s*(success|ok|sent|ret)/.test(stripped)
+      /if\s*\(\s*!(success|ok|sent|ret|result)\s*\)\s*revert/.test(stripped) ||
+      /if\s*\(\s*!(success|ok|sent|ret|result)\s*\)\s*\{?\s*revert/.test(stripped) ||
+      /!\s*(success|ok|sent|ret|result)\b/.test(stripped) ||
+      /assert\s*\(\s*(success|ok|sent|ret|result)\b/.test(stripped)
     );
   }
 
