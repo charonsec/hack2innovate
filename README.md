@@ -1,6 +1,6 @@
 # 🔐 HexAudit
 
-### AI-Powered Smart Contract Security Auditor
+### Powered Smart Contract Security Auditor
 
 **HexAudit** is an automated Solidity smart contract security auditing platform designed to identify common smart contract vulnerabilities, analyze contract structure through **AST and Control Flow Graphs**, correlate vulnerabilities with executable code paths, and generate interactive security reports with remediation guidance.
 
