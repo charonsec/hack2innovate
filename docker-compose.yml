@@ -1,0 +1,23 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: hexaudit-backend
+    environment:
+      PORT: 3001
+      CORS_ORIGIN: http://localhost:5173,http://127.0.0.1:5173
+    ports:
+      - '3001:3001'
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: hexaudit-frontend
+    ports:
+      - '5173:80'
+    depends_on:
+      - backend
+    restart: unless-stopped
