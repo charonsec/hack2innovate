@@ -27,3 +27,15 @@ Thumbs.db
 
 # Scratch / review artifacts
 .ui-review/
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# HexAudit generated benchmark output
+engine/benchmark_results/
+
+# Vendored repositories managed separately
+engine/deps/chainlink/
+engine/deps/oz/
+engine/tests/fixtures/real/

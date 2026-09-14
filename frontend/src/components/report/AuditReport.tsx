@@ -65,7 +65,7 @@ const TABS: TabDef[] = [
 function countAstNodes(node: unknown, acc: Map<string, number>): void {
   if (node == null || typeof node !== 'object') return;
   const obj = node as Record<string, unknown>;
-  const type = obj.type as string;
+  const type = (obj.nodeType ?? obj.type) as string;
   if (type) {
     acc.set(type, (acc.get(type) ?? 0) + 1);
   }
@@ -80,12 +80,22 @@ function countAstNodes(node: unknown, acc: Map<string, number>): void {
   }
 }
 
-function astStats(ast: object | undefined): { total: number; types: Array<[string, number]> } {
-  const acc = new Map<string, number>();
-  countAstNodes(ast ?? {}, acc);
-  const types = [...acc.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
-  const total = [...acc.values()].reduce((sum, v) => sum + v, 0);
-  return { total, types };
+function astStats(
+  ast: object | undefined
+): { total: number; types: Array<[string, number]> } {
+  const data = (ast ?? {}) as {
+    totalNodes?: number;
+    nodeTypes?: Record<string, number>;
+  };
+
+  const types = Object.entries(data.nodeTypes ?? {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12);
+
+  return {
+    total: data.totalNodes ?? 0,
+    types,
+  };
 }
 
 export function AuditReport({ report }: AuditReportProps) {
@@ -99,6 +109,9 @@ export function AuditReport({ report }: AuditReportProps) {
   const { startVerifyAudit } = useAudit();
 
   const ast = astStats(report.ast);
+
+  console.log('HEXAST REPORT AST:', report.ast);
+  console.log('HEXAST COMPUTED AST:', ast);
 
   const handleSelectVuln = useCallback(
     (vuln: Parameters<typeof selectVulnerability>[0]) => {
@@ -743,7 +756,7 @@ function countFunctions(ast: object | undefined): number {
   const walk = (node: unknown): void => {
     if (node == null || typeof node !== 'object') return;
     const obj = node as Record<string, unknown>;
-    if ((obj.type as string) === 'FunctionDefinition') count += 1;
+    if ((obj.nodeType ?? obj.type) === 'FunctionDefinition') count += 1;
     for (const value of Object.values(obj)) {
       if (Array.isArray(value)) {
         for (const item of value) {
@@ -761,7 +774,7 @@ function countStateVars(ast: object | undefined): number {
   const walk = (node: unknown): void => {
     if (node == null || typeof node !== 'object') return;
     const obj = node as Record<string, unknown>;
-    if ((obj.type as string) === 'StateVariableDeclaration') count += 1;
+    if (obj.nodeType === 'VariableDeclaration' && obj.stateVariable === true) count += 1;
     for (const value of Object.values(obj)) {
       if (Array.isArray(value)) {
         for (const item of value) {
