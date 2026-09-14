@@ -150,7 +150,15 @@ export class Analyzer {
     const parser = new Parser(sourceCode);
     const ast = parser.parseAstSafe();
     if (!ast) {
-      throw new Error('Failed to parse Solidity source code. Check syntax and compiler version.');
+      const detail = parser.getLastError();
+      throw new Error(
+        detail
+          ? `Failed to parse Solidity source code: ${detail}`
+          : 'Failed to parse Solidity source code. Check syntax and compiler version.'
+      );
+    }
+    if (parser.getIsFallbackAst()) {
+      emit('PARSING', 12, `Notice: Synthesized AST via resilient fallback parser (${parser.getLastError() ?? 'syntax notice'})`);
     }
     const functions: FunctionInfo[] = parser.extractFunctions(ast);
     const stateVariables: StateVariableInfo[] = parser.extractStateVariables(ast);

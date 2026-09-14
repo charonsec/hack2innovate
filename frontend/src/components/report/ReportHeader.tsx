@@ -67,7 +67,7 @@ export function ReportHeader({ report }: ReportHeaderProps) {
               {report.summary.informational > 0 && <Badge variant="info">{report.summary.informational} info</Badge>}
             </div>
             <div className="mt-1 text-center">
-              <span className="font-mono text-xs text-textSecondary">audit score</span>
+              <span className="font-mono text-xs text-textSecondary">contract health</span>
               <div className="font-mono text-xl font-bold" style={{ color: riskColor }}>
                 {report.auditScore.toFixed(1)}/100
               </div>

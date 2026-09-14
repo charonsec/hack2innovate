@@ -16,9 +16,11 @@ import {
   Workflow,
   Binary,
   AlertTriangle,
+  ArrowRight,
 } from 'lucide-react';
 import type { AuditReport as AuditReportType, VulnerabilityType } from '@/types';
 import { VULNERABILITY_TYPE_LABELS } from '@/types';
+import { severityRank } from '@/utils/severity.utils';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useAuditStore } from '@/store/auditStore';
 import { ReportHeader } from '@/components/report/ReportHeader';
@@ -111,7 +113,9 @@ export function AuditReport({ report }: AuditReportProps) {
         <Tabs defaultValue={activeTab} value={activeTab} onValueChange={setActiveTab}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <TabsList className="h-auto flex-wrap gap-1">
-              {TABS.map((tab) => {
+              {TABS.filter(
+                (tab) => tab.id !== 'bytecode' || report.bytecodeAnalysis?.valid
+              ).map((tab) => {
                 const Icon = tab.icon;
                 return (
                   <TabsTrigger key={tab.id} value={tab.id} className="gap-1.5">
@@ -124,8 +128,74 @@ export function AuditReport({ report }: AuditReportProps) {
             <PDFExporter report={report} />
           </div>
 
-          <TabsContent value="overview">
+          <TabsContent value="overview" className="mt-4 space-y-4">
             <ReportHeader report={report} />
+
+            <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
+              <Card>
+                <CardHeader className="flex-row items-center justify-between space-y-0">
+                  <div>
+                    <CardTitle>Top Findings</CardTitle>
+                    <CardDescription>
+                      {report.summary.total} finding
+                      {report.summary.total === 1 ? '' : 's'}, sorted by severity and CVSS
+                      impact.
+                    </CardDescription>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => setActiveTab('findings')}>
+                    View all
+                    <ArrowRight size={14} />
+                  </Button>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {[...report.vulnerabilities]
+                    .sort(
+                      (a, b) =>
+                        severityRank(a.severity) - severityRank(b.severity) ||
+                        b.cvssScore - a.cvssScore
+                    )
+                    .slice(0, 5)
+                    .map((v) => (
+                      <button
+                        key={v.id}
+                        onClick={() => {
+                          selectVulnerability(v);
+                          setActiveTab('findings');
+                        }}
+                        className="flex w-full items-center gap-3 rounded-lg border border-[#2A2D35] bg-surface px-3 py-2.5 text-left transition-colors hover:border-[#00FF88]/40"
+                      >
+                        <SeverityBadge severity={v.severity} withLabel />
+                        <span className="min-w-0 flex-1 truncate text-sm text-textPrimary">
+                          {v.title}
+                        </span>
+                        <span className="shrink-0 font-mono text-[11px] text-textSecondary">
+                          L{v.lineStart} · {v.cvssScore.toFixed(1)} CVSS
+                        </span>
+                      </button>
+                    ))}
+                  {report.vulnerabilities.length === 0 && (
+                    <p className="py-4 text-center text-sm text-textSecondary">
+                      No vulnerabilities were detected in this contract.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>At a Glance</CardTitle>
+                  <CardDescription>Static analysis footprint for this contract.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm">
+                  <StatRow label="Lines of code" value={String(report.linesOfCode)} />
+                  <StatRow label="Functions" value={String(countFunctions(report.ast))} />
+                  <StatRow label="CFG nodes" value={String(report.cfg.length)} />
+                  <StatRow label="Gas optimizations" value={String(report.gasOptimizations.length)} />
+                  <StatRow label="Scan duration" value={`${report.scanDuration}ms`} />
+                  <StatRow label="Solc version" value={report.solcVersion} />
+                </CardContent>
+              </Card>
+            </div>
           </TabsContent>
 
           <TabsContent value="summary">
@@ -327,7 +397,13 @@ export function AuditReport({ report }: AuditReportProps) {
                         </tr>
                       </thead>
                       <tbody>
-                        {report.vulnerabilities.map((v) => (
+                        {[...report.vulnerabilities]
+                          .sort(
+                            (a, b) =>
+                              severityRank(a.severity) - severityRank(b.severity) ||
+                              b.cvssScore - a.cvssScore
+                          )
+                          .map((v) => (
                           <tr
                             key={v.id}
                             className="border-b border-[#2A2D35]/50 transition-colors hover:bg-surface"
@@ -428,7 +504,7 @@ export function AuditReport({ report }: AuditReportProps) {
                     <p className="font-mono text-2xl font-bold text-textPrimary">
                       {report.auditScore.toFixed(1)}
                     </p>
-                    <p className="text-xs text-textSecondary">Audit Score / 100</p>
+                    <p className="text-xs text-textSecondary">Contract Health / 100</p>
                   </div>
                   <div className="rounded-lg border border-[#2A2D35] bg-surface p-4 text-center">
                     <p className="font-mono text-2xl font-bold text-textPrimary">

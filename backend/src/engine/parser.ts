@@ -79,14 +79,44 @@ function normalize(node: unknown): NodeWithLoc {
   return node as NodeWithLoc;
 }
 
+export function sanitizeSourceCode(source: string): string {
+  if (!source) return '';
+  let s = source.replace(/^\uFEFF/, '');
+  // Strip markdown code fences if wrapped in ```solidity ... ``` or ``` ... ```
+  s = s.replace(/^```(?:solidity|sol)?\r?\n/i, '').replace(/\r?\n```\s*$/i, '');
+  // Normalize line endings
+  s = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  // Strip zero-width and invisible formatting characters
+  s = s.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  return s;
+}
+
 export class Parser {
   private sourceCode: string;
+  private rawSource: string;
+  private lastError: string | null = null;
+  private isFallbackAst = false;
 
   constructor(sourceCode: string) {
-    this.sourceCode = sourceCode;
+    this.rawSource = sourceCode;
+    this.sourceCode = sanitizeSourceCode(sourceCode);
+  }
+
+  getLastError(): string | null {
+    return this.lastError;
+  }
+
+  getIsFallbackAst(): boolean {
+    return this.isFallbackAst;
   }
 
   parse(): NodeWithLoc {
+    if (!this.sourceCode.trim()) {
+      this.lastError = 'Solidity source code is empty or contains only whitespace.';
+      throw new Error(this.lastError);
+    }
+
+    // Attempt 1: Standard tolerant parser
     try {
       const ast = parse(this.sourceCode, {
         loc: true,
@@ -95,19 +125,194 @@ export class Parser {
         tokens: true,
       });
       return normalize(ast);
-    } catch (e) {
-      throw new Error(
-        `Solidity parse error: ${e instanceof Error ? e.message : String(e)}`
-      );
+    } catch (primaryErr) {
+      const primaryMsg =
+        primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+      this.lastError = primaryMsg;
+
+      // Attempt 2: Try building a resilient fallback AST from regex analysis
+      try {
+        const fallbackAst = this.buildFallbackAst();
+        const extractedContracts = findNodesAst(fallbackAst, 'ContractDefinition');
+        const extractedFns = findNodesAst(fallbackAst, 'FunctionDefinition');
+
+        if (extractedContracts.length > 0 || extractedFns.length > 0) {
+          this.isFallbackAst = true;
+          console.warn(
+            `[Parser] Primary parser failed (${primaryMsg}); recovered with fallback AST (${extractedContracts.length} contracts, ${extractedFns.length} functions).`
+          );
+          return fallbackAst;
+        }
+      } catch (fallbackErr) {
+        console.warn('[Parser] Fallback AST construction error:', fallbackErr);
+      }
+
+      throw new Error(`Solidity parse error: ${primaryMsg}`);
     }
   }
 
   parseAstSafe(): NodeWithLoc | null {
     try {
       return this.parse();
-    } catch {
+    } catch (err) {
+      if (!this.lastError && err instanceof Error) {
+        this.lastError = err.message;
+      }
       return null;
     }
+  }
+
+  private buildFallbackAst(): NodeWithLoc {
+    const lines = this.sourceCode.split('\n');
+    const children: NodeWithLoc[] = [];
+
+    // 1. Pragma directive
+    const pragmaMatch = this.sourceCode.match(/pragma\s+solidity\s+([^;]+);/);
+    if (pragmaMatch) {
+      children.push({
+        type: 'PragmaDirective',
+        name: 'solidity',
+        value: pragmaMatch[1].trim(),
+      });
+    }
+
+    // 2. Contracts / Interfaces / Libraries
+    const contractRegex =
+      /(?:abstract\s+)?(contract|interface|library)\s+([A-Za-z0-9_]+)(?:\s+is\s+([^{]+))?\s*\{/g;
+    let match: RegExpExecArray | null;
+    while ((match = contractRegex.exec(this.sourceCode)) !== null) {
+      const kind = match[1];
+      const name = match[2];
+      const startLine = this.sourceCode.slice(0, match.index).split('\n').length;
+
+      children.push({
+        type: 'ContractDefinition',
+        name,
+        kind,
+        subNodes: [],
+        loc: {
+          start: { line: startLine, column: 0 },
+          end: { line: lines.length, column: 0 },
+        },
+      });
+    }
+
+    // 3. Functions
+    const fnRegex =
+      /function\s+([A-Za-z0-9_]*)\s*\(([^)]*)\)\s*([^{;]*)(?:\{|;)/g;
+    while ((match = fnRegex.exec(this.sourceCode)) !== null) {
+      const fnName = match[1] || 'fallback';
+      const paramsStr = match[2];
+      const modifiersStr = match[3];
+      const startLine = this.sourceCode.slice(0, match.index).split('\n').length;
+
+      let endLine = startLine;
+      const bodyStartIdx = this.sourceCode.indexOf('{', match.index);
+      if (bodyStartIdx !== -1 && bodyStartIdx - match.index < 250) {
+        let depth = 1;
+        let i = bodyStartIdx + 1;
+        while (i < this.sourceCode.length && depth > 0) {
+          if (this.sourceCode[i] === '{') depth++;
+          else if (this.sourceCode[i] === '}') depth--;
+          i++;
+        }
+        endLine = this.sourceCode.slice(0, i).split('\n').length;
+      }
+
+      const visibility =
+        modifiersStr.match(/\b(public|external|internal|private)\b/)?.[1] ||
+        'public';
+      const modifiers = (
+        modifiersStr.match(
+          /\b(onlyOwner|onlyRole|nonReentrant|view|pure|payable|[A-Za-z0-9_]+)\b/g
+        ) || []
+      ).filter(
+        (m) =>
+          !['public', 'external', 'internal', 'private', 'returns', 'function'].includes(m)
+      );
+
+      const paramNodes: NodeWithLoc[] = paramsStr
+        .split(',')
+        .filter((p) => p.trim().length > 0)
+        .map((p) => {
+          const parts = p.trim().split(/\s+/);
+          return {
+            type: 'VariableDeclaration',
+            typeName: { type: 'ElementaryTypeName', name: parts[0] || 'uint256' },
+            name: parts[1] || '',
+          };
+        });
+
+      children.push({
+        type: 'FunctionDefinition',
+        name: fnName,
+        visibility,
+        modifiers: modifiers.map((m) => ({ type: 'ModifierInvocation', name: m })),
+        parameters: {
+          type: 'ParameterList',
+          parameters: paramNodes,
+        },
+        returnParameters: {
+          type: 'ParameterList',
+          parameters: [],
+        },
+        loc: {
+          start: { line: startLine, column: 0 },
+          end: { line: Math.max(startLine, endLine), column: 0 },
+        },
+        body: {
+          type: 'Block',
+          loc: {
+            start: { line: startLine, column: 0 },
+            end: { line: Math.max(startLine, endLine), column: 0 },
+          },
+        },
+      });
+    }
+
+    // 4. State variables
+    const stateVarRegex =
+      /^\s*(mapping\s*\([^;]+\)|[A-Za-z0-9_\[\]]+)\s+(public|private|internal)?\s*([A-Za-z0-9_]+)\s*(?:=[^;]+)?;/gm;
+    while ((match = stateVarRegex.exec(this.sourceCode)) !== null) {
+      const typeName = match[1];
+      const visibility = match[2] || 'internal';
+      const varName = match[3];
+      const line = this.sourceCode.slice(0, match.index).split('\n').length;
+
+      children.push({
+        type: 'StateVariableDeclaration',
+        variables: [
+          {
+            type: 'VariableDeclaration',
+            typeName: { type: 'ElementaryTypeName', name: typeName },
+            name: varName,
+            visibility,
+            isConstant: false,
+            isImmutable: false,
+            loc: { start: { line, column: 0 }, end: { line, column: 0 } },
+          },
+        ],
+        loc: { start: { line, column: 0 }, end: { line, column: 0 } },
+      });
+    }
+
+    // 5. Modifiers
+    const modRegex = /modifier\s+([A-Za-z0-9_]+)\s*(?:\([^)]*\))?\s*\{/g;
+    while ((match = modRegex.exec(this.sourceCode)) !== null) {
+      const modName = match[1];
+      const line = this.sourceCode.slice(0, match.index).split('\n').length;
+      children.push({
+        type: 'ModifierDefinition',
+        name: modName,
+        body: true,
+        loc: { start: { line, column: 0 }, end: { line, column: 0 } },
+      });
+    }
+
+    return {
+      type: 'SourceUnit',
+      children,
+    };
   }
 
   extractFunctions(astRoot: NodeWithLoc): FunctionInfo[] {

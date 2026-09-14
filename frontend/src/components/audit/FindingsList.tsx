@@ -6,7 +6,7 @@ import { VulnerabilityCard } from '@/components/audit/VulnerabilityCard';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { cx } from '@/utils/format.utils';
-import { SEVERITY_ORDER } from '@/utils/severity.utils';
+import { SEVERITY_ORDER, severityRank } from '@/utils/severity.utils';
 
 export interface FindingsListProps {
   vulnerabilities: Vulnerability[];
@@ -33,14 +33,20 @@ export function FindingsList({
   }, [vulnerabilities]);
 
   const filtered = useMemo(() => {
-    return vulnerabilities.filter((v) => {
-      const matchesQuery =
-        !query ||
-        v.title.toLowerCase().includes(query.toLowerCase()) ||
-        v.swcId.toLowerCase().includes(query.toLowerCase());
-      const matchesFilter = filter === 'ALL' || v.severity === filter;
-      return matchesQuery && matchesFilter;
-    });
+    return [...vulnerabilities]
+      .sort(
+        (a, b) =>
+          severityRank(a.severity) - severityRank(b.severity) ||
+          b.cvssScore - a.cvssScore
+      )
+      .filter((v) => {
+        const matchesQuery =
+          !query ||
+          v.title.toLowerCase().includes(query.toLowerCase()) ||
+          v.swcId.toLowerCase().includes(query.toLowerCase());
+        const matchesFilter = filter === 'ALL' || v.severity === filter;
+        return matchesQuery && matchesFilter;
+      });
   }, [vulnerabilities, query, filter]);
 
   if (vulnerabilities.length === 0) {
@@ -61,7 +67,7 @@ export function FindingsList({
     <div className="flex flex-col gap-3">
       {!compact && (
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <div className="relative flex-1">
+          <div className="relative min-w-[200px] flex-1">
             <Search
               size={14}
               className="absolute left-3 top-1/2 -translate-y-1/2 text-textSecondary/60"
@@ -73,7 +79,7 @@ export function FindingsList({
               className="pl-9"
             />
           </div>
-          <div className="flex gap-1">
+          <div className="flex flex-wrap gap-1">
             {(['ALL', ...SEVERITY_ORDER] as Array<'ALL' | Severity>).map((sev) => (
               <Button
                 key={sev}

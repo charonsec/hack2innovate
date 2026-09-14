@@ -24,3 +24,6 @@ Thumbs.db
 
 # Runtime reports (in-memory only by design; nothing persisted)
 *.pdf
+
+# Scratch / review artifacts
+.ui-review/

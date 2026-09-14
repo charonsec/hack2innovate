@@ -27,7 +27,7 @@ export function Navbar() {
             <span className="font-mono text-lg font-bold text-textPrimary">
               Hex<span className="text-[#00FF88]">Audit</span>
             </span>
-            <span className="block text-[10px] uppercase tracking-widest text-textSecondary">
+            <span className="hidden text-[10px] uppercase tracking-widest text-textSecondary sm:block">
               Smart Contract Auditor
             </span>
           </div>

@@ -144,7 +144,10 @@ export function HomePage() {
       }
       const reader = new FileReader();
       reader.onload = () => {
-        const text = String(reader.result ?? '');
+        let text = String(reader.result ?? '');
+        // Strip UTF-8 BOM and markdown code fences if present
+        text = text.replace(/^\uFEFF/, '');
+        text = text.replace(/^```(?:solidity|sol)?\r?\n/i, '').replace(/\r?\n```\s*$/i, '');
         setSourceCode(text);
         setContractName(file.name.replace(/\.sol$/i, ''));
         setUploadFile(file.name, file.size);

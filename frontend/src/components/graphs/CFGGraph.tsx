@@ -85,16 +85,16 @@ export function CFGGraph({
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
+    const zoomBehavior = d3
+      .zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.3, 2.5])
+      .on('zoom', (event) => {
+        zoomGroup.attr('transform', event.transform.toString());
+      });
+
     const zoomGroup = svg.append('g');
 
-    svg.call(
-      d3
-        .zoom<SVGSVGElement, unknown>()
-        .scaleExtent([0.3, 2.5])
-        .on('zoom', (event) => {
-          zoomGroup.attr('transform', event.transform.toString());
-        })
-    );
+    svg.call(zoomBehavior);
 
     const defs = svg.append('defs');
     defs
@@ -187,14 +187,42 @@ export function CFGGraph({
       .style('opacity', 0.5)
       .style('pointer-events', 'none');
 
+    // Keep nodes inside the visible viewport — the unbounded force layout used
+    // to push nodes and labels past the container edges.
+    const pad = 56;
+    const clamp = (v: number | undefined, min: number, max: number) =>
+      Math.max(min, Math.min(max, v ?? 0));
+
     simulation.on('tick', () => {
       link
-        .attr('x1', (d) => (d.source as unknown as CFGGraphNode).x ?? 0)
-        .attr('y1', (d) => (d.source as unknown as CFGGraphNode).y ?? 0)
-        .attr('x2', (d) => (d.target as unknown as CFGGraphNode).x ?? 0)
-        .attr('y2', (d) => (d.target as unknown as CFGGraphNode).y ?? 0);
+        .attr('x1', (d) => clamp((d.source as unknown as CFGGraphNode).x, pad, width - pad))
+        .attr('y1', (d) => clamp((d.source as unknown as CFGGraphNode).y, pad, effectiveHeight - pad))
+        .attr('x2', (d) => clamp((d.target as unknown as CFGGraphNode).x, pad, width - pad))
+        .attr('y2', (d) => clamp((d.target as unknown as CFGGraphNode).y, pad, effectiveHeight - pad));
 
-      node.attr('transform', (d) => `translate(${d.x ?? 0},${d.y ?? 0})`);
+      node.attr('transform', (d) => {
+        const x = clamp(d.x, pad, width - pad);
+        const y = clamp(d.y, pad, effectiveHeight - pad);
+        d.x = x;
+        d.y = y;
+        return `translate(${x},${y})`;
+      });
+    });
+
+    // When the layout settles, fit the whole graph into view.
+    simulation.on('end', () => {
+      const xs = graphNodes.map((d) => d.x ?? 0);
+      const ys = graphNodes.map((d) => d.y ?? 0);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const bw = Math.max(1, maxX - minX);
+      const bh = Math.max(1, maxY - minY);
+      const scale = Math.min((width - 2 * pad) / bw, (effectiveHeight - 2 * pad) / bh, 1.2);
+      const tx = width / 2 - scale * ((minX + maxX) / 2);
+      const ty = effectiveHeight / 2 - scale * ((minY + maxY) / 2);
+      svg.call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
     });
 
     return () => {
