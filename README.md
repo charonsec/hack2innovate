@@ -174,6 +174,171 @@ The TypeScript backend is **not part of the active smart-contract audit request 
 
 ---
 
+
+Yes. The current section has unnecessary empty code blocks and numbering. For a README, I'd make it clean and copy-paste friendly like this:
+
+````markdown
+# Local Setup
+
+## Requirements
+
+Make sure the following are installed:
+
+- Git
+- Python 3.10+
+- Node.js 18+
+- npm
+
+### Recommended Versions
+
+```text
+Node.js 20+
+Python 3.11+
+````
+
+---
+
+## 1. Clone the Repository
+
+```bash
+git clone <REPOSITORY_URL>
+cd hack2innovate
+```
+
+---
+
+## 2. Setup the Python Audit Engine
+
+HexAudit uses a Python-based security analysis engine.
+
+### Create a Virtual Environment
+
+```bash
+python3 -m venv .venv
+```
+
+### Activate the Virtual Environment
+
+#### Linux / macOS
+
+```bash
+source .venv/bin/activate
+```
+
+#### Windows PowerShell
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+### Install Python Dependencies
+
+```bash
+pip install -r engine/requirements.txt
+```
+
+### Start the Audit Engine
+
+From the project root:
+
+```bash
+cd engine
+uvicorn auditor.api.main:app --host 127.0.0.1 --port 3009
+```
+
+The Python audit engine will be available at:
+
+```text
+http://127.0.0.1:3009
+```
+
+### Verify the Engine
+
+Open a **second terminal** and run:
+
+```bash
+curl http://127.0.0.1:3009/api/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "ok",
+  "engine": "python",
+  "version": "1.0.0"
+}
+```
+
+> Keep the Python engine terminal running while using the frontend.
+
+---
+
+## 3. Setup the Frontend
+
+Open another terminal.
+
+From the project root:
+
+```bash
+cd hack2innovate/frontend
+```
+
+Install frontend dependencies:
+
+```bash
+npm install
+```
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+The frontend will be available at:
+
+```text
+http://localhost:5173
+```
+
+Open the URL in your browser.
+
+> Keep both terminals running:
+>
+> * **Python Audit Engine:** `127.0.0.1:3009`
+> * **React Frontend:** `localhost:5173`
+
+---
+
+## 4. Start Using HexAudit
+
+Once both services are running:
+
+1. Open `http://localhost:5173`
+2. Navigate to the Audit page.
+3. Paste a Solidity smart contract.
+4. Start the audit.
+5. Review the detected vulnerabilities.
+6. Select findings to inspect the affected source lines.
+7. Explore the AST and Control Flow Graph.
+8. Review risk scores and remediation recommendations.
+
+````
+
+### One small correction
+
+For the jury, I would **not mention `npm run build` at all** in the local setup if they only need to evaluate the application. `npm run dev` is simpler and avoids the Monaco/Vite production-build issue we encountered.
+
+Also, keep the **port numbers explicit** because your architecture intentionally uses:
+
+```text
+Frontend → 5173
+Python Auditor → 3009
+````
+
+
+
 # ✨ Key Objectives & Functional Requirements
 
 ## 1. Solidity Source Code Parser
